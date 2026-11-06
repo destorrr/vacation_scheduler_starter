@@ -191,7 +191,7 @@ def create_organization(
         raise HTTPException(status_code=422, detail="Укажите название организации (до 255 символов).")
     if normalized_short_name and len(normalized_short_name) > 100:
         raise HTTPException(status_code=422, detail="Краткое название должно быть не длиннее 100 символов.")
-    if normalized_inn and not re.fullmatch(r"\\d{10}|\\d{12}", normalized_inn):
+    if normalized_inn and not re.fullmatch(r"\d{10}|\d{12}", normalized_inn):
         raise HTTPException(status_code=422, detail="ИНН должен содержать 10 или 12 цифр.")
     if normalized_inn and db.scalar(select(Organization.id).where(Organization.inn == normalized_inn)):
         raise HTTPException(status_code=409, detail="Организация с таким ИНН уже существует.")

@@ -10,7 +10,7 @@ from app.security import hash_password
 
 
 def create_admin() -> int:
-    username = input("Имя пользователя central_hr: ").strip()
+    username = input("Имя пользователя central_hr: ").strip().lower()
     full_name = input("ФИО пользователя: ").strip()
     if not username or not full_name:
         print("Имя пользователя и ФИО обязательны.", file=sys.stderr)
