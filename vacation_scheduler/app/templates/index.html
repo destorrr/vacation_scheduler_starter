@@ -10,10 +10,13 @@
   <nav class="navbar bg-white border-bottom">
     <div class="container">
       <span class="navbar-brand mb-0 h1">{{ app_name }}</span>
-      <form method="post" action="/logout">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="btn btn-outline-secondary btn-sm" type="submit">Выйти</button>
-      </form>
+      <div class="d-flex align-items-center gap-2">
+        {% if user.role == "central_hr" %}<a class="btn btn-outline-primary btn-sm" href="/admin/users">Пользователи</a>{% endif %}
+        <form method="post" action="/logout">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="btn btn-outline-secondary btn-sm" type="submit">Выйти</button>
+        </form>
+      </div>
     </div>
   </nav>
   <main class="container py-4">
