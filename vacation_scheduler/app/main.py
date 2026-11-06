@@ -90,7 +90,8 @@ def campaigns_page(
         name="campaigns.html",
         context={
             "app_name": settings.app_name, "user": user, "campaign_rows": campaign_rows,
-            "organizations": organizations, "csrf_token": request.session["csrf_token"],\n            "now_year": date.today().year,
+            "organizations": organizations, "csrf_token": request.session["csrf_token"],
+            "now_year": date.today().year,
         },
     )
 
