@@ -66,6 +66,35 @@ def normalize_person_name(value: str | None) -> str:
     return " ".join(re.sub(r"[^а-яa-z0-9]+", " ", value).split())
 
 
+
+def map_sibling_rows(db: Session, template: TemplateFile, source_row: TemplateRow, employee: Employee) -> int:
+    siblings = db.scalars(
+        select(TemplateRow).where(
+            TemplateRow.template_file_id == template.id,
+            TemplateRow.employee_id.is_(None),
+        )
+    ).all()
+    mapped = 0
+    source_number = (source_row.personnel_number or "").strip().casefold()
+    source_name = normalize_person_name(source_row.employee_name)
+    for sibling in siblings:
+        sibling_number = (sibling.personnel_number or "").strip().casefold()
+        same_person = (
+            bool(source_number and sibling_number and source_number == sibling_number)
+            or (
+                not source_number
+                and not sibling_number
+                and bool(source_name)
+                and source_name == normalize_person_name(sibling.employee_name)
+            )
+        )
+        if same_person:
+            sibling.employee_id = employee.id
+            sibling.mapping_status = "matched"
+            mapped += 1
+    return mapped
+
+
 @app.get("/campaigns", response_class=HTMLResponse)
 def campaigns_page(
     request: Request,
@@ -325,9 +354,10 @@ def map_template_row(
         raise HTTPException(status_code=422, detail="Выберите сотрудника из этой организации.")
     row.employee_id = employee.id
     row.mapping_status = "matched"
+    sibling_count = map_sibling_rows(db, template, row, employee)
     db.add(AuditLog(
         user_id=user.id, action="template_row.mapped", entity_type="template_row",
-        entity_id=row.id, details={"employee_id": str(employee.id)},
+        entity_id=row.id, details={"employee_id": str(employee.id), "sibling_rows_mapped": sibling_count},
     ))
     db.commit()
     return RedirectResponse(
@@ -362,7 +392,21 @@ def create_employee_from_template_row(
             Employee.organization_id == campaign_org.organization_id,
             Employee.personnel_number == row.personnel_number,
         ))
-    if employee is None:
+    if employee is None and not row.personnel_number:
+        name_matches = db.scalars(select(Employee).where(
+            Employee.organization_id == campaign_org.organization_id,
+            Employee.is_active.is_(True),
+        )).all()
+        exact_matches = [
+            item for item in name_matches
+            if normalize_person_name(item.full_name) == normalize_person_name(row.employee_name)
+        ]
+        if len(exact_matches) == 1:
+            employee = exact_matches[0]
+        elif len(exact_matches) > 1:
+            raise HTTPException(status_code=409, detail="Найдено несколько сотрудников с таким ФИО. Выберите существующего сотрудника вручную.")
+    created = employee is None
+    if created:
         employee = Employee(
             organization_id=campaign_org.organization_id,
             personnel_number=row.personnel_number,
@@ -373,10 +417,18 @@ def create_employee_from_template_row(
         db.flush()
     row.employee_id = employee.id
     row.mapping_status = "matched"
+    sibling_count = map_sibling_rows(db, template, row, employee)
     db.add(AuditLog(
-        user_id=user.id, action="employee.created_from_template", entity_type="employee",
+        user_id=user.id,
+        action="employee.created_from_template" if created else "template_rows.mapped_by_employee",
+        entity_type="employee",
         entity_id=employee.id,
-        details={"template_row_id": str(row.id), "personnel_number": row.personnel_number},
+        details={
+            "template_row_id": str(row.id),
+            "personnel_number": row.personnel_number,
+            "created": created,
+            "sibling_rows_mapped": sibling_count,
+        },
     ))
     db.commit()
     return RedirectResponse(
