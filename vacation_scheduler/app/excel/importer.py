@@ -20,7 +20,7 @@ HEADER_ALIASES = {
         "наименование структурного подразделения",
     },
     "position_name": {
-        "должность", "профессия должность", "наименование должности",
+        "должность", "профессия должность", "наименование должности", "должность специальность профессия",
     },
 }
 
@@ -53,7 +53,7 @@ def detect_header(ws, scan_rows: int = 30) -> tuple[int, dict[str, int]] | None:
 
 
 def parse_workbook(source: str | Path) -> list[dict]:
-    workbook = load_workbook(source, read_only=False, data_only=True)
+    try:\n        workbook = load_workbook(source, read_only=False, data_only=True)\n    except Exception as exc:\n        raise ValueError("Файл не удалось прочитать как книгу Excel. Проверьте, что файл не повреждён и не защищён паролем.") from exc
     parsed: list[dict] = []
     detected_sheets = 0
     try:
