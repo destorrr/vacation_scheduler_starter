@@ -26,7 +26,7 @@
         <div class="text-secondary">Роль: {% if user.role == "central_hr" %}Центральный HR{% else %}Ответственный организации{% endif %}</div>
       </div>
     </div>
-    <h2 class="h5">Доступные организации</h2>
+    <div class="d-flex justify-content-between align-items-center mb-3"><h2 class="h5 mb-0">Доступные организации</h2><a class="btn btn-primary btn-sm" href="/campaigns">Графики отпусков</a></div>
     {% if organizations %}
       <div class="list-group">
         {% for organization in organizations %}

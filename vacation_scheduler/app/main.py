@@ -41,6 +41,348 @@ def audit(db: Session, actor: User, action: str, entity_id: UUID, details: dict)
     ))
 
 
+# Campaigns, template import and employee-row mapping routes.
+from collections import defaultdict
+from hashlib import sha256
+from pathlib import Path
+from uuid import UUID, uuid4
+import re
+import unicodedata
+
+from fastapi import File, UploadFile
+from fastapi.responses import RedirectResponse
+from sqlalchemy import func
+from app.models.entities import (
+    Campaign, CampaignOrganization, Employee, TemplateFile, TemplateRow,
+)
+from app.excel.importer import parse_workbook
+
+
+def normalize_person_name(value: str | None) -> str:
+    if not value:
+        return ""
+    value = unicodedata.normalize("NFKC", value).lower().replace("ё", "е")
+    return " ".join(re.sub(r"[^а-яa-z0-9]+", " ", value).split())
+
+
+@app.get("/campaigns", response_class=HTMLResponse)
+def campaigns_page(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = (
+        select(CampaignOrganization, Campaign, Organization)
+        .join(Campaign, Campaign.id == CampaignOrganization.campaign_id)
+        .join(Organization, Organization.id == CampaignOrganization.organization_id)
+        .order_by(Campaign.year.desc(), Organization.name)
+    )
+    if user.role != "central_hr":
+        query = query.join(
+            UserOrganization, UserOrganization.organization_id == Organization.id
+        ).where(UserOrganization.user_id == user.id)
+    campaign_rows = db.execute(query).all()
+    organizations = db.scalars(
+        select(Organization).where(Organization.is_active.is_(True)).order_by(Organization.name)
+    ).all() if user.role == "central_hr" else []
+    return templates.TemplateResponse(
+        request=request,
+        name="campaigns.html",
+        context={
+            "app_name": settings.app_name, "user": user, "campaign_rows": campaign_rows,
+            "organizations": organizations, "csrf_token": request.session["csrf_token"],
+        },
+    )
+
+
+@app.post("/campaigns")
+def create_campaign(
+    request: Request,
+    year: int = Form(...),
+    name: str = Form(...),
+    organization_ids: list[str] = Form([]),
+    csrf_token: str = Form(...),
+    actor: User = Depends(require_roles("central_hr")),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token)
+    if year < 2000 or year > 2200:
+        raise HTTPException(status_code=422, detail="Год должен быть в диапазоне 2000–2200.")
+    if not name.strip() or len(name.strip()) > 255:
+        raise HTTPException(status_code=422, detail="Укажите название кампании.")
+    if not organization_ids:
+        raise HTTPException(status_code=422, detail="Выберите хотя бы одну организацию.")
+    if db.scalar(select(Campaign.id).where(Campaign.year == year)):
+        raise HTTPException(status_code=409, detail="Кампания на этот год уже существует.")
+    try:
+        selected_ids = {UUID(value) for value in organization_ids}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Некорректный идентификатор организации.") from exc
+    active_ids = set(db.scalars(select(Organization.id).where(
+        Organization.id.in_(selected_ids), Organization.is_active.is_(True)
+    )).all())
+    if active_ids != selected_ids:
+        raise HTTPException(status_code=422, detail="Выбрана несуществующая или неактивная организация.")
+    campaign = Campaign(year=year, name=name.strip(), status="draft", created_by=actor.id)
+    db.add(campaign)
+    db.flush()
+    for org_id in selected_ids:
+        db.add(CampaignOrganization(
+            campaign_id=campaign.id, organization_id=org_id, status="pending"
+        ))
+    db.add(AuditLog(
+        user_id=actor.id, action="campaign.created", entity_type="campaign",
+        entity_id=campaign.id,
+        details={"year": year, "organization_ids": [str(x) for x in selected_ids]},
+    ))
+    db.commit()
+    return RedirectResponse("/campaigns", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.get("/campaign-organizations/{campaign_org_id}", response_class=HTMLResponse)
+def campaign_organization_page(
+    campaign_org_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    campaign_org = db.get(CampaignOrganization, campaign_org_id)
+    if campaign_org is None:
+        raise HTTPException(status_code=404, detail="Кампания организации не найдена.")
+    require_org_access(campaign_org.organization_id, user, db)
+    campaign = db.get(Campaign, campaign_org.campaign_id)
+    organization = db.get(Organization, campaign_org.organization_id)
+    current_template = db.scalar(
+        select(TemplateFile).where(
+            TemplateFile.campaign_organization_id == campaign_org.id,
+            TemplateFile.is_current.is_(True),
+        ).order_by(TemplateFile.version_number.desc())
+    )
+    rows = []
+    if current_template:
+        rows = db.scalars(
+            select(TemplateRow).where(TemplateRow.template_file_id == current_template.id)
+            .order_by(TemplateRow.sheet_name, TemplateRow.row_number)
+        ).all()
+    employees = db.scalars(
+        select(Employee).where(
+            Employee.organization_id == organization.id, Employee.is_active.is_(True)
+        ).order_by(Employee.full_name)
+    ).all()
+    return templates.TemplateResponse(
+        request=request, name="campaign_organization.html",
+        context={
+            "app_name": settings.app_name, "user": user, "campaign": campaign,
+            "campaign_org": campaign_org, "organization": organization,
+            "current_template": current_template, "rows": rows, "employees": employees,
+            "csrf_token": request.session["csrf_token"],
+        },
+    )
+
+
+@app.post("/campaign-organizations/{campaign_org_id}/template")
+async def upload_template(
+    campaign_org_id: UUID,
+    request: Request,
+    file: UploadFile = File(...),
+    csrf_token: str = Form(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token)
+    campaign_org = db.get(CampaignOrganization, campaign_org_id)
+    if campaign_org is None:
+        raise HTTPException(status_code=404, detail="Кампания организации не найдена.")
+    require_org_access(campaign_org.organization_id, user, db)
+    campaign = db.get(Campaign, campaign_org.campaign_id)
+    if campaign.status in {"closed", "archived"}:
+        raise HTTPException(status_code=409, detail="Кампания закрыта для изменений.")
+    filename = Path(file.filename or "template.xlsx").name
+    if Path(filename).suffix.lower() not in {".xlsx", ".xlsm"}:
+        raise HTTPException(status_code=415, detail="Поддерживаются файлы .xlsx и .xlsm.")
+    content = await file.read()
+    if not content or len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Файл пустой или превышает лимит 20 МБ.")
+    temp_dir = Path(settings.storage_path) / "temp"
+    originals_dir = Path(settings.storage_path) / "originals"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    originals_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"{uuid4().hex}.xlsx"
+    temp_path.write_bytes(content)
+    try:
+        parsed_rows = parse_workbook(temp_path)
+    except ValueError as exc:
+        temp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    digest = sha256(content).hexdigest()
+    duplicate = db.scalar(select(TemplateFile.id).where(
+        TemplateFile.campaign_organization_id == campaign_org.id,
+        TemplateFile.sha256 == digest,
+    ))
+    if duplicate:
+        temp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=409, detail="Этот файл уже загружался в данную кампанию.")
+    max_version = db.scalar(select(func.max(TemplateFile.version_number)).where(
+        TemplateFile.campaign_organization_id == campaign_org.id
+    )) or 0
+    version = max_version + 1
+    stored_name = f"{campaign_org.id}_v{version}_{uuid4().hex}{Path(filename).suffix.lower()}"
+    stored_path = originals_dir / stored_name
+    temp_path.replace(stored_path)
+    db.query(TemplateFile).filter(
+        TemplateFile.campaign_organization_id == campaign_org.id,
+        TemplateFile.is_current.is_(True),
+    ).update({TemplateFile.is_current: False}, synchronize_session=False)
+    template = TemplateFile(
+        campaign_organization_id=campaign_org.id,
+        organization_id=campaign_org.organization_id,
+        original_filename=filename[:255],
+        storage_path=str(stored_path),
+        sha256=digest,
+        version_number=version,
+        is_current=True,
+        uploaded_by=user.id,
+    )
+    db.add(template)
+    db.flush()
+    employee_by_number = {}
+    employees = db.scalars(select(Employee).where(
+        Employee.organization_id == campaign_org.organization_id,
+        Employee.is_active.is_(True),
+    )).all()
+    for employee in employees:
+        if employee.personnel_number:
+            employee_by_number.setdefault(employee.personnel_number.strip().casefold(), []).append(employee)
+    employee_by_name = defaultdict(list)
+    for employee in employees:
+        employee_by_name[normalize_person_name(employee.full_name)].append(employee)
+
+    matched_count = 0
+    review_count = 0
+    for row in parsed_rows:
+        matches = []
+        if row["personnel_number"]:
+            matches = employee_by_number.get(row["personnel_number"].strip().casefold(), [])
+        if not matches:
+            matches = employee_by_name.get(normalize_person_name(row["employee_name"]), [])
+        mapped_employee = matches[0] if len(matches) == 1 else None
+        mapping_status = "matched" if mapped_employee else ("needs_review" if len(matches) > 1 else "unmatched")
+        if mapped_employee:
+            matched_count += 1
+        elif mapping_status == "needs_review":
+            review_count += 1
+        db.add(TemplateRow(
+            template_file_id=template.id,
+            employee_id=mapped_employee.id if mapped_employee else None,
+            sheet_name=row["sheet_name"],
+            row_number=row["row_number"],
+            department_name=row["department_name"],
+            position_name=row["position_name"],
+            employee_name=row["employee_name"],
+            personnel_number=row["personnel_number"],
+            mapping_status=mapping_status,
+        ))
+    campaign_org.status = "imported"
+    db.add(AuditLog(
+        user_id=user.id, action="template.uploaded", entity_type="template_file",
+        entity_id=template.id,
+        details={
+            "campaign_organization_id": str(campaign_org.id),
+            "version": version, "row_count": len(parsed_rows),
+            "matched_count": matched_count, "needs_review_count": review_count,
+        },
+    ))
+    db.commit()
+    return RedirectResponse(
+        f"/campaign-organizations/{campaign_org.id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.post("/template-rows/{row_id}/map")
+def map_template_row(
+    row_id: UUID,
+    request: Request,
+    employee_id: str = Form(...),
+    csrf_token: str = Form(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token)
+    row = db.get(TemplateRow, row_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Строка шаблона не найдена.")
+    template = db.get(TemplateFile, row.template_file_id)
+    campaign_org = db.get(CampaignOrganization, template.campaign_organization_id)
+    require_org_access(campaign_org.organization_id, user, db)
+    campaign = db.get(Campaign, campaign_org.campaign_id)
+    if campaign.status in {"closed", "archived"}:
+        raise HTTPException(status_code=409, detail="Кампания закрыта для изменений.")
+    employee = db.get(Employee, UUID(employee_id))
+    if employee is None or employee.organization_id != campaign_org.organization_id:
+        raise HTTPException(status_code=422, detail="Выберите сотрудника из этой организации.")
+    row.employee_id = employee.id
+    row.mapping_status = "matched"
+    db.add(AuditLog(
+        user_id=user.id, action="template_row.mapped", entity_type="template_row",
+        entity_id=row.id, details={"employee_id": str(employee.id)},
+    ))
+    db.commit()
+    return RedirectResponse(
+        f"/campaign-organizations/{campaign_org.id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.post("/template-rows/{row_id}/create-employee")
+def create_employee_from_template_row(
+    row_id: UUID,
+    request: Request,
+    csrf_token: str = Form(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token)
+    row = db.get(TemplateRow, row_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Строка шаблона не найдена.")
+    template = db.get(TemplateFile, row.template_file_id)
+    campaign_org = db.get(CampaignOrganization, template.campaign_organization_id)
+    require_org_access(campaign_org.organization_id, user, db)
+    campaign = db.get(Campaign, campaign_org.campaign_id)
+    if campaign.status in {"closed", "archived"}:
+        raise HTTPException(status_code=409, detail="Кампания закрыта для изменений.")
+    if row.employee_id:
+        raise HTTPException(status_code=409, detail="Строка уже сопоставлена с сотрудником.")
+    employee = None
+    if row.personnel_number:
+        employee = db.scalar(select(Employee).where(
+            Employee.organization_id == campaign_org.organization_id,
+            Employee.personnel_number == row.personnel_number,
+        ))
+    if employee is None:
+        employee = Employee(
+            organization_id=campaign_org.organization_id,
+            personnel_number=row.personnel_number,
+            full_name=row.employee_name,
+            is_active=True,
+        )
+        db.add(employee)
+        db.flush()
+    row.employee_id = employee.id
+    row.mapping_status = "matched"
+    db.add(AuditLog(
+        user_id=user.id, action="employee.created_from_template", entity_type="employee",
+        entity_id=employee.id,
+        details={"template_row_id": str(row.id), "personnel_number": row.personnel_number},
+    ))
+    db.commit()
+    return RedirectResponse(
+        f"/campaign-organizations/{campaign_org.id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
