@@ -43,6 +43,7 @@ def audit(db: Session, actor: User, action: str, entity_id: UUID, details: dict)
 
 # Campaigns, template import and employee-row mapping routes.
 from collections import defaultdict
+from datetime import date
 from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid4
