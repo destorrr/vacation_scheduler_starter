@@ -173,6 +173,48 @@ def users_page(
     )
 
 
+@app.post("/admin/organizations")
+def create_organization(
+    request: Request,
+    name: str = Form(...),
+    short_name: str = Form(""),
+    inn: str = Form(""),
+    csrf_token: str = Form(...),
+    actor: User = Depends(require_roles("central_hr")),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token)
+    normalized_name = name.strip()
+    normalized_short_name = short_name.strip() or None
+    normalized_inn = inn.strip() or None
+    if not normalized_name or len(normalized_name) > 255:
+        raise HTTPException(status_code=422, detail="Укажите название организации (до 255 символов).")
+    if normalized_short_name and len(normalized_short_name) > 100:
+        raise HTTPException(status_code=422, detail="Краткое название должно быть не длиннее 100 символов.")
+    if normalized_inn and not re.fullmatch(r"\\d{10}|\\d{12}", normalized_inn):
+        raise HTTPException(status_code=422, detail="ИНН должен содержать 10 или 12 цифр.")
+    if normalized_inn and db.scalar(select(Organization.id).where(Organization.inn == normalized_inn)):
+        raise HTTPException(status_code=409, detail="Организация с таким ИНН уже существует.")
+
+    organization = Organization(
+        name=normalized_name,
+        short_name=normalized_short_name,
+        inn=normalized_inn,
+        is_active=True,
+    )
+    db.add(organization)
+    db.flush()
+    db.add(AuditLog(
+        user_id=actor.id,
+        action="organization.created",
+        entity_type="organization",
+        entity_id=organization.id,
+        details={"name": normalized_name, "inn": normalized_inn},
+    ))
+    db.commit()
+    return RedirectResponse("/admin/users?saved=organization-created", status_code=status.HTTP_303_SEE_OTHER)
+
+
 @app.post("/admin/users")
 def create_responsible(
     request: Request,

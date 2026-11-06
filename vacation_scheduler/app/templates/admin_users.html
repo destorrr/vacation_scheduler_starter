@@ -18,6 +18,31 @@
     {% if success == "created" %}<div class="alert alert-success">Пользователь создан.</div>{% endif %}
     {% if success == "updated" %}<div class="alert alert-success">Изменения сохранены.</div>{% endif %}
 
+    {% if success == "organization-created" %}<div class="alert alert-success">Организация создана.</div>{% endif %}
+    <section class="card border-0 shadow-sm mb-4">
+      <div class="card-body">
+        <h2 class="h5">Добавить организацию</h2>
+        <form method="post" action="/admin/organizations" class="row g-3">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="col-md-5">
+            <label class="form-label" for="org-name">Полное название</label>
+            <input class="form-control" id="org-name" name="name" maxlength="255" required>
+          </div>
+          <div class="col-md-3">
+            <label class="form-label" for="org-short">Краткое название</label>
+            <input class="form-control" id="org-short" name="short_name" maxlength="100">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label" for="org-inn">ИНН (необязательно)</label>
+            <input class="form-control" id="org-inn" name="inn" inputmode="numeric" pattern="([0-9]{10}|[0-9]{12})" maxlength="12">
+          </div>
+          <div class="col-md-2 d-flex align-items-end">
+            <button class="btn btn-outline-primary w-100" type="submit">Добавить</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
     <section class="card border-0 shadow-sm mb-4">
       <div class="card-body">
         <h2 class="h5">Добавить ответственного</h2>
