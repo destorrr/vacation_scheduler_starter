@@ -20,7 +20,8 @@ HEADER_ALIASES = {
         "наименование структурного подразделения",
     },
     "position_name": {
-        "должность", "профессия должность", "наименование должности", "должность специальность профессия",
+        "должность", "профессия должность", "наименование должности",
+        "должность специальность профессия",
     },
 }
 
@@ -35,6 +36,8 @@ def normalize_header(value: Any) -> str:
 def clean_cell(value: Any) -> str | None:
     if value is None:
         return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
     text = " ".join(str(value).replace("\u00a0", " ").split()).strip()
     return text or None
 
@@ -53,7 +56,13 @@ def detect_header(ws, scan_rows: int = 30) -> tuple[int, dict[str, int]] | None:
 
 
 def parse_workbook(source: str | Path) -> list[dict]:
-    try:\n        workbook = load_workbook(source, read_only=False, data_only=True)\n    except Exception as exc:\n        raise ValueError("Файл не удалось прочитать как книгу Excel. Проверьте, что файл не повреждён и не защищён паролем.") from exc
+    try:
+        workbook = load_workbook(source, read_only=False, data_only=True)
+    except Exception as exc:
+        raise ValueError(
+            "Файл не удалось прочитать как книгу Excel. Проверьте, что файл не повреждён и не защищён паролем."
+        ) from exc
+
     parsed: list[dict] = []
     detected_sheets = 0
     try:
@@ -65,6 +74,7 @@ def parse_workbook(source: str | Path) -> list[dict]:
             header_row, columns = header
             previous_department: str | None = None
             previous_position: str | None = None
+
             for row_idx in range(header_row + 1, ws.max_row + 1):
                 def value(field: str):
                     col = columns.get(field)
@@ -74,18 +84,20 @@ def parse_workbook(source: str | Path) -> list[dict]:
                 department = value("department_name") or previous_department
                 position = value("position_name") or previous_position
                 personnel_number = value("personnel_number")
+
                 if department:
                     previous_department = department
                 if position:
                     previous_position = position
                 if not employee_name:
                     continue
-                # Skip repeated headings and obvious non-employee summary rows.
+
                 normalized_name = normalize_header(employee_name)
                 if normalized_name in HEADER_ALIASES["employee_name"]:
                     continue
                 if len(employee_name) < 5 or not re.search(r"[А-Яа-яЁё]", employee_name):
                     continue
+
                 parsed.append({
                     "sheet_name": ws.title[:100],
                     "row_number": row_idx,
