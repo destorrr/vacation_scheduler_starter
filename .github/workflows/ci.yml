@@ -79,3 +79,21 @@ jobs:
             nginx:stable-alpine nginx -t
       - name: Build application Docker image
         run: docker build -t vacation-scheduler:ci .
+      - name: Smoke test the production Compose stack
+        run: |
+          trap 'docker compose down -v --remove-orphans || true; rm -f .env' EXIT
+          cp .env.example .env
+          sed -i "s|^SECRET_KEY=.*|SECRET_KEY=$(openssl rand -hex 32)|" .env
+          sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 32)|" .env
+          mkdir -p storage
+          sudo chown -R 10001:10001 storage
+          docker compose up -d --build
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8080/health; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail http://127.0.0.1:8080/health
+          docker compose ps
+          docker compose exec -T app alembic upgrade head
