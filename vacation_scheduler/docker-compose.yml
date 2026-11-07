@@ -52,7 +52,7 @@ services:
         max-file: "3"
 
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:stable-alpine
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:80"
