@@ -115,6 +115,12 @@ def test_postgres_migrations_and_authenticated_http_workflow():
         assert home.status_code == 200
         assert f"CI Allowed {suffix}" in home.text
         assert f"CI Denied {suffix}" not in home.text
+        organization_link = f"/organizations/{allowed_org_id}"
+        assert organization_link in home.text
+        organization_page = client.get(organization_link)
+        assert organization_page.status_code == 200
+        assert f"CI Allowed {suffix}" in organization_page.text
+        assert "Организация" in organization_page.text
         assert client.get("/admin/users").status_code == 403
         campaigns = client.get("/campaigns")
         assert campaigns.status_code == 200
@@ -172,20 +178,7 @@ def test_reference_t7_http_upload_vacation_entry_and_excel_download(tmp_path):
         db.add_all([admin, organization])
         db.flush()
 
-        # Pre-create one employee per distinct normalized FIO in this legal entity.
-        employee_by_name = {}
-        for row in parsed:
-            normalized = normalize_person_name(row["employee_name"])
-            if normalized and normalized not in employee_by_name:
-                employee = Employee(
-                    organization_id=organization.id,
-                    full_name=row["employee_name"],
-                    is_active=True,
-                )
-                db.add(employee)
-                employee_by_name[normalized] = employee
-        db.flush()
-        target_employee_id = employee_by_name[normalize_person_name(target_name)].id
+        # Employees must be created by the actual template upload, not pre-seeded.
         organization_id = organization.id
         db.commit()
 
@@ -237,6 +230,16 @@ def test_reference_t7_http_upload_vacation_entry_and_excel_download(tmp_path):
             )
             assert template is not None
             template_id = template.id
+            imported_employees = db.scalars(
+                select(Employee).where(Employee.organization_id == organization_id)
+            ).all()
+            expected_names = {normalize_person_name(row["employee_name"]) for row in parsed}
+            assert {normalize_person_name(item.full_name) for item in imported_employees} == expected_names
+            target_employee = next(
+                item for item in imported_employees
+                if normalize_person_name(item.full_name) == normalize_person_name(target_name)
+            )
+            target_employee_id = target_employee.id
             mapped_rows = db.scalars(
                 select(TemplateRow).where(
                     TemplateRow.template_file_id == template_id,
@@ -408,3 +411,103 @@ def test_responsible_can_ignore_non_employee_template_row():
         saved_row = db.get(TemplateRow, row_id)
         assert saved_row.mapping_status == "ignored"
         assert saved_row.employee_id is None
+
+
+def test_existing_template_rows_can_be_auto_mapped_without_reupload():
+    """An already uploaded template can be repaired in place after deploying the fix."""
+    from app.models.entities import (
+        Campaign, CampaignOrganization, Employee, TemplateFile, TemplateRow,
+    )
+
+    suffix = uuid4().hex[:10]
+    password = "Integration-Test-Password-2026!"
+    full_name = "Смирнова Марина Викторовна"
+    annotated_names = [
+        "Смирнова Марина Викторовна (внутр.совм.)",
+        "СМИРНОВА, Марина Викторовна (внешн.совм.)",
+    ]
+    with SessionLocal() as db:
+        user = User(
+            username=f"ci-remap-{suffix}",
+            full_name="CI Existing Template Responsible",
+            password_hash=hash_password(password),
+            role="central_hr",
+            is_active=True,
+        )
+        organization = Organization(name=f"CI Existing Template Org {suffix}")
+        db.add_all([user, organization])
+        db.flush()
+        used_years = set(db.scalars(select(Campaign.year)).all())
+        candidate_year = 2000 + int(suffix[:4], 16) % 200
+        while candidate_year in used_years:
+            candidate_year = 2000 + (candidate_year - 1999) % 200
+        campaign = Campaign(
+            year=candidate_year,
+            name=f"CI Existing Template Campaign {suffix}",
+            status="draft",
+            created_by=user.id,
+        )
+        db.add(campaign)
+        db.flush()
+        campaign_org = CampaignOrganization(
+            campaign_id=campaign.id,
+            organization_id=organization.id,
+            status="imported",
+        )
+        db.add(campaign_org)
+        db.flush()
+        template = TemplateFile(
+            campaign_organization_id=campaign_org.id,
+            organization_id=organization.id,
+            original_filename="already-uploaded.xlsx",
+            storage_path="/tmp/already-uploaded.xlsx",
+            sha256=uuid4().hex + uuid4().hex,
+            version_number=1,
+            is_current=True,
+            uploaded_by=user.id,
+        )
+        db.add(template)
+        db.flush()
+        for index, name in enumerate(annotated_names, start=2):
+            db.add(TemplateRow(
+                template_file_id=template.id,
+                sheet_name="TDSheet",
+                row_number=index,
+                department_name="Бухгалтерия",
+                position_name="Бухгалтер" if index == 2 else "Главный бухгалтер",
+                employee_name=name,
+                personnel_number=f"00{index}",
+                mapping_status="unmatched",
+            ))
+        campaign_org_id = campaign_org.id
+        organization_id = organization.id
+        template_id = template.id
+        db.commit()
+
+    with TestClient(app) as client:
+        _login(client, f"ci-remap-{suffix}", password)
+        page = client.get(f"/campaign-organizations/{campaign_org_id}")
+        assert page.status_code == 200
+        assert "Автоматически создать и сопоставить" in page.text
+        response = client.post(
+            f"/campaign-organizations/{campaign_org_id}/auto-map-employees",
+            data={"csrf_token": _csrf_token(page)},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+
+    with SessionLocal() as db:
+        employees = db.scalars(
+            select(Employee).where(Employee.organization_id == organization_id)
+        ).all()
+        assert len(employees) == 1
+        assert employees[0].full_name == full_name
+        rows = db.scalars(
+            select(TemplateRow).where(
+                TemplateRow.template_file_id == template_id
+            ).order_by(TemplateRow.row_number)
+        ).all()
+        assert len(rows) == 2
+        assert all(row.mapping_status == "matched" for row in rows)
+        assert all(row.employee_id == employees[0].id for row in rows)
+        assert [row.employee_name for row in rows] == [full_name, full_name]

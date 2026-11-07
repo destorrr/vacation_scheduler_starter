@@ -15,6 +15,7 @@ from app.models.entities import (
     AuditLog, Organization, User, UserOrganization, VacationPlan, VacationPeriod, ExportFile,
 )
 from app.security import csrf_is_valid, hash_password, new_csrf_token, verify_password
+from app.services.employee_matching import clean_person_name, normalize_person_name
 
 app = FastAPI(title=settings.app_name, debug=settings.debug)
 app.add_middleware(
@@ -61,7 +62,6 @@ from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid4
 import re
-import unicodedata
 
 from fastapi import File, UploadFile
 from fastapi.responses import RedirectResponse
@@ -71,13 +71,6 @@ from app.models.entities import (
 )
 from app.excel.importer import parse_workbook
 from app.excel.exporter import fill_workbook
-
-
-def normalize_person_name(value: str | None) -> str:
-    if not value:
-        return ""
-    value = unicodedata.normalize("NFKC", value).lower().replace("ё", "е")
-    return " ".join(re.sub(r"[^а-яa-z0-9]+", " ", value).split())
 
 
 
@@ -206,12 +199,16 @@ def campaign_organization_page(
             Employee.organization_id == organization.id, Employee.is_active.is_(True)
         ).order_by(Employee.full_name)
     ).all()
+    unresolved_count = sum(
+        row.mapping_status in {"unmatched", "needs_review"} for row in rows
+    )
     return templates.TemplateResponse(
         request=request, name="campaign_organization.html",
         context={
             "app_name": settings.app_name, "user": user, "campaign": campaign,
             "campaign_org": campaign_org, "organization": organization,
             "current_template": current_template, "rows": rows, "employees": employees,
+            "unresolved_count": unresolved_count,
             "csrf_token": request.session["csrf_token"],
             "upload_error": request.query_params.get("upload_error"),
         },
@@ -296,9 +293,21 @@ async def upload_template(
             employee_by_name.setdefault(normalized_name, employee)
 
     matched_count = 0
+    created_employee_count = 0
     review_count = 0
     for row in parsed_rows:
-        mapped_employee = employee_by_name.get(normalize_person_name(row["employee_name"]))
+        normalized_name = normalize_person_name(row["employee_name"])
+        mapped_employee = employee_by_name.get(normalized_name)
+        if normalized_name and mapped_employee is None:
+            mapped_employee = Employee(
+                organization_id=campaign_org.organization_id,
+                full_name=clean_person_name(row["employee_name"]),
+                is_active=True,
+            )
+            db.add(mapped_employee)
+            db.flush()
+            employee_by_name[normalized_name] = mapped_employee
+            created_employee_count += 1
         mapping_status = "matched" if mapped_employee else "unmatched"
         if mapped_employee:
             matched_count += 1
@@ -309,7 +318,7 @@ async def upload_template(
             row_number=row["row_number"],
             department_name=row["department_name"],
             position_name=row["position_name"],
-            employee_name=row["employee_name"],
+            employee_name=mapped_employee.full_name if mapped_employee else clean_person_name(row["employee_name"]),
             personnel_number=row["personnel_number"],
             mapping_status=mapping_status,
         ))
@@ -320,7 +329,9 @@ async def upload_template(
         details={
             "campaign_organization_id": str(campaign_org.id),
             "version": version, "row_count": len(parsed_rows),
-            "matched_count": matched_count, "needs_review_count": review_count,
+            "matched_count": matched_count,
+            "created_employee_count": created_employee_count,
+            "needs_review_count": review_count,
         },
     ))
     db.commit()
@@ -358,6 +369,84 @@ def map_template_row(
     db.add(AuditLog(
         user_id=user.id, action="template_row.mapped", entity_type="template_row",
         entity_id=row.id, details={"employee_id": str(employee.id), "sibling_rows_mapped": sibling_count},
+    ))
+    db.commit()
+    return RedirectResponse(
+        f"/campaign-organizations/{campaign_org.id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.post("/campaign-organizations/{campaign_org_id}/auto-map-employees")
+def auto_map_template_employees(
+    campaign_org_id: UUID,
+    request: Request,
+    csrf_token: str = Form(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create missing employee records and map unresolved rows in the current template."""
+    check_csrf(request, csrf_token)
+    campaign_org = db.get(CampaignOrganization, campaign_org_id)
+    if campaign_org is None:
+        raise HTTPException(status_code=404, detail="Кампания организации не найдена.")
+    require_org_access(campaign_org.organization_id, user, db)
+    campaign = db.get(Campaign, campaign_org.campaign_id)
+    if campaign.status in {"closed", "archived"}:
+        raise HTTPException(status_code=409, detail="Кампания закрыта для изменений.")
+    template = db.scalar(
+        select(TemplateFile).where(
+            TemplateFile.campaign_organization_id == campaign_org.id,
+            TemplateFile.is_current.is_(True),
+        ).order_by(TemplateFile.version_number.desc())
+    )
+    if template is None:
+        raise HTTPException(status_code=404, detail="Сначала загрузите шаблон Excel.")
+    employees = db.scalars(select(Employee).where(
+        Employee.organization_id == campaign_org.organization_id,
+        Employee.is_active.is_(True),
+    ).order_by(Employee.created_at, Employee.id)).all()
+    employee_by_name = {}
+    for employee in employees:
+        key = normalize_person_name(employee.full_name)
+        if key:
+            employee_by_name.setdefault(key, employee)
+
+    rows = db.scalars(
+        select(TemplateRow).where(
+            TemplateRow.template_file_id == template.id,
+            TemplateRow.mapping_status.in_(["unmatched", "needs_review"]),
+            TemplateRow.employee_id.is_(None),
+        ).order_by(TemplateRow.sheet_name, TemplateRow.row_number)
+    ).all()
+    created_count = 0
+    mapped_count = 0
+    for row in rows:
+        normalized_name = normalize_person_name(row.employee_name)
+        if not normalized_name:
+            continue
+        employee = employee_by_name.get(normalized_name)
+        if employee is None:
+            employee = Employee(
+                organization_id=campaign_org.organization_id,
+                full_name=clean_person_name(row.employee_name),
+                is_active=True,
+            )
+            db.add(employee)
+            db.flush()
+            employee_by_name[normalized_name] = employee
+            created_count += 1
+        row.employee_id = employee.id
+        row.employee_name = employee.full_name
+        row.mapping_status = "matched"
+        mapped_count += 1
+
+    db.add(AuditLog(
+        user_id=user.id,
+        action="template.employees_auto_mapped",
+        entity_type="template_file",
+        entity_id=template.id,
+        details={"created_employee_count": created_count, "mapped_row_count": mapped_count},
     ))
     db.commit()
     return RedirectResponse(
@@ -835,17 +924,40 @@ def index(
     )
 
 
-@app.get("/organizations/{organization_id}")
-def organization_access_check(
+@app.get("/organizations/{organization_id}", response_class=HTMLResponse)
+def organization_page(
     organization_id: UUID,
+    request: Request,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     require_org_access(organization_id, user, db)
     organization = db.get(Organization, organization_id)
-    if organization is None:
+    if organization is None or not organization.is_active:
         raise HTTPException(status_code=404, detail="Организация не найдена.")
-    return {"id": str(organization.id), "name": organization.name}
+    campaign_rows = db.execute(
+        select(CampaignOrganization, Campaign)
+        .join(Campaign, Campaign.id == CampaignOrganization.campaign_id)
+        .where(CampaignOrganization.organization_id == organization.id)
+        .order_by(Campaign.year.desc())
+    ).all()
+    employee_count = db.scalar(
+        select(func.count(Employee.id)).where(
+            Employee.organization_id == organization.id,
+            Employee.is_active.is_(True),
+        )
+    ) or 0
+    return templates.TemplateResponse(
+        request=request,
+        name="organization.html",
+        context={
+            "app_name": settings.app_name,
+            "user": user,
+            "organization": organization,
+            "campaign_rows": campaign_rows,
+            "employee_count": employee_count,
+        },
+    )
 
 
 @app.get("/admin/users", response_class=HTMLResponse)

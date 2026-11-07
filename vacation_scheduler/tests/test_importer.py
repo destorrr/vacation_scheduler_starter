@@ -141,3 +141,23 @@ def test_formula_cells_without_cached_values_are_not_imported_as_employee_names(
 
     # openpyxl does not calculate formulas; with data_only=True an uncached formula is blank.
     assert [row["employee_name"] for row in rows] == ["Петров Пётр Петрович"]
+
+
+
+def test_import_preserves_original_fio_with_employment_annotation(tmp_path):
+    path = tmp_path / "annotated-fio-test.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Т-7"
+    ws.append(["ФИО", "Должность"])
+    ws.append(["Смирнова Марина Викторовна (внутр.совм.)", "Бухгалтер"])
+    ws.append(["Виноградова Наталья Михайловна (внешн.совм.)", "Специалист"])
+    wb.save(path)
+    try:
+        rows = parse_workbook(path)
+        assert [row["employee_name"] for row in rows] == [
+            "Смирнова Марина Викторовна (внутр.совм.)",
+            "Виноградова Наталья Михайловна (внешн.совм.)",
+        ]
+    finally:
+        path.unlink(missing_ok=True)

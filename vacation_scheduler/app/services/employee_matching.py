@@ -9,7 +9,17 @@ from typing import TypeVar
 T = TypeVar("T")
 
 
+def clean_person_name(value: str | None) -> str:
+    """Remove employment annotations that are not part of a person's full name."""
+    if not value:
+        return ""
+    value = unicodedata.normalize("NFKC", value).replace("\u00a0", " ").strip()
+    value = re.sub(r"\s*\([^)]*совм[^)]*\)\s*$", "", value, flags=re.IGNORECASE)
+    return " ".join(value.split())
+
+
 def normalize_person_name(value: str | None) -> str:
+    value = clean_person_name(value)
     if not value:
         return ""
     value = unicodedata.normalize("NFKC", value).lower().replace("ё", "е")
