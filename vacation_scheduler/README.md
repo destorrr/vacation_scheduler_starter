@@ -22,16 +22,14 @@
 
 ### 1. Получить исходный код
 
-Клонируйте репозиторий и переключитесь на согласованную ветку:
+Клонируйте основную ветку репозитория и перейдите в каталог приложения:
 
 ```bash
 git clone https://github.com/destorrr/vacation_scheduler_starter.git
-cd vacation_scheduler_starter
-git switch feature/auth-and-permissions
-cd vacation_scheduler
+cd vacation_scheduler_starter/vacation_scheduler
 ```
 
-Перед эксплуатацией используйте проверенный commit из ветки, а не незакреплённый рабочий каталог.
+Для воспроизводимого развёртывания зафиксируйте конкретный проверенный commit из `main`; не обновляйте рабочий сервер автоматически до произвольного состояния ветки.
 
 ### 2. Подготовить секреты и каталоги
 
