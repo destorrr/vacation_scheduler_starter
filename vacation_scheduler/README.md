@@ -24,8 +24,9 @@
 
 ```bash
 git clone https://github.com/destorrr/vacation_scheduler_starter.git
-cd vacation_scheduler
+cd vacation_scheduler_starter
 git switch feature/auth-and-permissions
+cd vacation_scheduler
 ```
 
 Перед эксплуатацией используйте проверенный commit из ветки, а не незакреплённый рабочий каталог.
