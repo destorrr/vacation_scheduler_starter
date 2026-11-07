@@ -1,5 +1,6 @@
 from datetime import date
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -207,3 +208,31 @@ def test_end_to_end_reference_template_groups_by_name_and_exports_all_positions(
     finally:
         wb.close()
         source_wb.close()
+
+
+def test_xlsm_export_preserves_vba_project_payload(tmp_path):
+    xlsx_source = tmp_path / "macro-source.xlsx"
+    source = tmp_path / "macro-source.xlsm"
+    output = tmp_path / "macro-filled.xlsm"
+    make_template(xlsx_source)
+    macro_payload = b"test-vba-project-payload"
+    with ZipFile(xlsx_source, "r") as original, ZipFile(source, "w", ZIP_DEFLATED) as macro_book:
+        for item in original.infolist():
+            macro_book.writestr(item, original.read(item.filename))
+        macro_book.writestr("xl/vbaProject.bin", macro_payload)
+
+    result = fill_workbook(
+        source, output,
+        [{"sheet_name": "TDSheet", "row_number": 22, "employee_id": "employee-1"}],
+        {"employee-1": [{"start_date": date(2027, 3, 1), "duration_days": 14}]},
+    )
+
+    assert result == {"filled_rows": 1, "filled_periods": 1}
+    with ZipFile(output, "r") as exported:
+        assert exported.read("xl/vbaProject.bin") == macro_payload
+    wb = load_workbook(output, keep_vba=True, data_only=False)
+    try:
+        assert wb["TDSheet"]["E22"].value == 14
+        assert wb["TDSheet"]["G22"].value == "01.03.2027 (14)"
+    finally:
+        wb.close()
