@@ -213,6 +213,7 @@ def campaign_organization_page(
             "campaign_org": campaign_org, "organization": organization,
             "current_template": current_template, "rows": rows, "employees": employees,
             "csrf_token": request.session["csrf_token"],
+            "upload_error": request.query_params.get("upload_error"),
         },
     )
 
