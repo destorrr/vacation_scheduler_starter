@@ -6,3 +6,6 @@ __pycache__/
 .coverage
 storage/*
 !storage/.gitkeep
+backups/
+*.dump
+*.dump.gz
