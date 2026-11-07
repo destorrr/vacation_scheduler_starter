@@ -111,10 +111,10 @@ jobs:
           sudo mkdir -p storage/originals
           mkdir -p backups
           printf '%s\\n' 'original-file-before-backup' | sudo tee storage/originals/backup-restore-probe.txt >/dev/null
-          printf '%s\\n' \
-            "CREATE TABLE backup_restore_probe (marker text NOT NULL);" \
-            "INSERT INTO backup_restore_probe VALUES ('before-backup');" \
-            | docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'
+          docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+          CREATE TABLE backup_restore_probe (marker text NOT NULL);
+          INSERT INTO backup_restore_probe VALUES ('before-backup');
+          SQL
           sh scripts/backup.sh
           db_backup="$(find backups -maxdepth 1 -name 'postgres-*.sql.gz' -print -quit)"
           storage_backup="$(find backups -maxdepth 1 -name 'storage-*.tar.gz' -print -quit)"
