@@ -138,6 +138,7 @@ def main():
         page.goto(f"{BASE_URL}/campaigns")
         page.get_by_text(campaign_name).click()
         page.locator('input[type="file"][name="file"]').set_input_files(data["workbook_path"])
+        page.get_by_role("button", name="Загрузить и разобрать").click()
         page.wait_for_load_state("networkidle")
         assert page.get_by_role("heading", name="Найденные строки сотрудников").count() == 1, (
             f"Template upload did not render the parsed rows. "
