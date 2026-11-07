@@ -2,7 +2,7 @@ import re
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -11,7 +11,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user, require_org_access, require_roles
-from app.models.entities import AuditLog, Organization, User, UserOrganization
+from app.models.entities import (\n    AuditLog, Organization, User, UserOrganization, VacationPlan, VacationPeriod, ExportFile,\n)
 from app.security import csrf_is_valid, hash_password, new_csrf_token, verify_password
 
 app = FastAPI(title=settings.app_name)
@@ -435,6 +435,292 @@ def create_employee_from_template_row(
         f"/campaign-organizations/{campaign_org.id}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
+
+
+@app.get("/campaign-organizations/{campaign_org_id}/vacations", response_class=HTMLResponse)
+def vacation_plans_page(
+    campaign_org_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    campaign_org = db.get(CampaignOrganization, campaign_org_id)
+    if campaign_org is None:
+        raise HTTPException(status_code=404, detail="Кампания организации не найдена.")
+    require_org_access(campaign_org.organization_id, user, db)
+    campaign = db.get(Campaign, campaign_org.campaign_id)
+    organization = db.get(Organization, campaign_org.organization_id)
+    current_template = db.scalar(select(TemplateFile).where(
+        TemplateFile.campaign_organization_id == campaign_org.id,
+        TemplateFile.is_current.is_(True),
+    ).order_by(TemplateFile.version_number.desc()))
+    if current_template is None:
+        raise HTTPException(status_code=409, detail="Сначала загрузите Excel-шаблон Т-7.")
+    unresolved_count = db.scalar(select(func.count(TemplateRow.id)).where(
+        TemplateRow.template_file_id == current_template.id,
+        TemplateRow.mapping_status.not_in(["matched", "ignored"]),
+    )) or 0
+    employee_rows = db.execute(
+        select(Employee, func.count(TemplateRow.id).label("row_count"))
+        .join(TemplateRow, TemplateRow.employee_id == Employee.id)
+        .where(
+            TemplateRow.template_file_id == current_template.id,
+            Employee.organization_id == campaign_org.organization_id,
+        )
+        .group_by(Employee.id)
+        .order_by(Employee.full_name)
+    ).all()
+    employee_periods = []
+    for employee, row_count in employee_rows:
+        plan = db.scalar(select(VacationPlan).where(
+            VacationPlan.campaign_organization_id == campaign_org.id,
+            VacationPlan.employee_id == employee.id,
+        ))
+        periods = db.scalars(select(VacationPeriod).where(
+            VacationPeriod.vacation_plan_id == plan.id
+        ).order_by(VacationPeriod.sort_order, VacationPeriod.start_date)).all() if plan else []
+        employee.row_count = row_count
+        employee_periods.append((employee, periods))
+    exports = db.scalars(select(ExportFile).where(
+        ExportFile.campaign_organization_id == campaign_org.id
+    ).order_by(ExportFile.created_at.desc())).all()
+    return templates.TemplateResponse(
+        request=request, name="vacation_plans.html",
+        context={
+            "app_name": settings.app_name, "user": user, "campaign": campaign,
+            "campaign_org": campaign_org, "organization": organization,
+            "employee_periods": employee_periods, "unresolved_count": unresolved_count,
+            "exports": exports, "csrf_token": request.session["csrf_token"],
+        },
+    )
+
+
+@app.post("/campaign-organizations/{campaign_org_id}/employees/{employee_id}/periods")
+def add_vacation_period(
+    campaign_org_id: UUID,
+    employee_id: UUID,
+    request: Request,
+    start_date: str = Form(...),
+    end_date: str = Form(...),
+    csrf_token: str = Form(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token)
+    campaign_org = db.get(CampaignOrganization, campaign_org_id)
+    if campaign_org is None:
+        raise HTTPException(status_code=404, detail="Кампания организации не найдена.")
+    require_org_access(campaign_org.organization_id, user, db)
+    campaign = db.get(Campaign, campaign_org.campaign_id)
+    if campaign.status in {"closed", "archived"}:
+        raise HTTPException(status_code=409, detail="Кампания закрыта для изменений.")
+    employee = db.get(Employee, employee_id)
+    if employee is None or employee.organization_id != campaign_org.organization_id:
+        raise HTTPException(status_code=404, detail="Сотрудник не найден в этой организации.")
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Укажите корректные даты.") from exc
+    if end < start:
+        raise HTTPException(status_code=422, detail="Дата окончания не может быть раньше даты начала.")
+    template = db.scalar(select(TemplateFile).where(
+        TemplateFile.campaign_organization_id == campaign_org.id,
+        TemplateFile.is_current.is_(True),
+    ))
+    if template is None:
+        raise HTTPException(status_code=409, detail="Сначала загрузите Excel-шаблон.")
+    linked = db.scalar(select(TemplateRow.id).where(
+        TemplateRow.template_file_id == template.id,
+        TemplateRow.employee_id == employee.id,
+        TemplateRow.mapping_status == "matched",
+    ))
+    if linked is None:
+        raise HTTPException(status_code=409, detail="Сотрудник не связан со строками текущего шаблона.")
+    plan = db.scalar(select(VacationPlan).where(
+        VacationPlan.campaign_organization_id == campaign_org.id,
+        VacationPlan.employee_id == employee.id,
+    ))
+    if plan is None:
+        plan = VacationPlan(
+            campaign_organization_id=campaign_org.id,
+            organization_id=campaign_org.organization_id,
+            employee_id=employee.id,
+            created_by=user.id,
+        )
+        db.add(plan)
+        db.flush()
+    max_order = db.scalar(select(func.max(VacationPeriod.sort_order)).where(
+        VacationPeriod.vacation_plan_id == plan.id
+    )) or 0
+    period = VacationPeriod(
+        vacation_plan_id=plan.id,
+        start_date=start,
+        end_date=end,
+        sort_order=max_order + 1,
+    )
+    db.add(period)
+    db.add(AuditLog(
+        user_id=user.id, action="vacation_period.created",
+        entity_type="vacation_period", entity_id=period.id,
+        details={"employee_id": str(employee.id), "start_date": start.isoformat(), "end_date": end.isoformat()},
+    ))
+    db.commit()
+    return RedirectResponse(
+        f"/campaign-organizations/{campaign_org.id}/vacations",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.post("/vacation-periods/{period_id}/delete")
+def delete_vacation_period(
+    period_id: UUID,
+    request: Request,
+    csrf_token: str = Form(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token)
+    period = db.get(VacationPeriod, period_id)
+    if period is None:
+        raise HTTPException(status_code=404, detail="Период отпуска не найден.")
+    plan = db.get(VacationPlan, period.vacation_plan_id)
+    campaign_org = db.get(CampaignOrganization, plan.campaign_organization_id)
+    require_org_access(campaign_org.organization_id, user, db)
+    campaign = db.get(Campaign, campaign_org.campaign_id)
+    if campaign.status in {"closed", "archived"}:
+        raise HTTPException(status_code=409, detail="Кампания закрыта для изменений.")
+    start_value, end_value = period.start_date.isoformat(), period.end_date.isoformat()
+    db.add(AuditLog(
+        user_id=user.id, action="vacation_period.deleted",
+        entity_type="vacation_period", entity_id=period.id,
+        details={"employee_id": str(plan.employee_id), "start_date": start_value, "end_date": end_value},
+    ))
+    db.delete(period)
+    db.commit()
+    return RedirectResponse(
+        f"/campaign-organizations/{campaign_org.id}/vacations",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.post("/campaign-organizations/{campaign_org_id}/export")
+def create_excel_export(
+    campaign_org_id: UUID,
+    request: Request,
+    csrf_token: str = Form(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token)
+    campaign_org = db.get(CampaignOrganization, campaign_org_id)
+    if campaign_org is None:
+        raise HTTPException(status_code=404, detail="Кампания организации не найдена.")
+    require_org_access(campaign_org.organization_id, user, db)
+    campaign = db.get(Campaign, campaign_org.campaign_id)
+    if campaign.status in {"closed", "archived"}:
+        raise HTTPException(status_code=409, detail="Закрытая кампания не допускает новый экспорт.")
+    template = db.scalar(select(TemplateFile).where(
+        TemplateFile.campaign_organization_id == campaign_org.id,
+        TemplateFile.is_current.is_(True),
+    ).order_by(TemplateFile.version_number.desc()))
+    if template is None:
+        raise HTTPException(status_code=409, detail="Не загружен оригинальный Excel-шаблон.")
+    rows = db.scalars(select(TemplateRow).where(
+        TemplateRow.template_file_id == template.id
+    ).order_by(TemplateRow.sheet_name, TemplateRow.row_number)).all()
+    unresolved = [r for r in rows if r.mapping_status not in {"matched", "ignored"}]
+    if unresolved:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Экспорт остановлен: осталось несопоставленных строк — {len(unresolved)}.",
+        )
+    if not Path(template.storage_path).is_file():
+        raise HTTPException(status_code=410, detail="Оригинальный Excel-файл не найден в хранилище.")
+    plans = db.scalars(select(VacationPlan).where(
+        VacationPlan.campaign_organization_id == campaign_org.id
+    )).all()
+    periods_by_employee = {}
+    for plan in plans:
+        periods = db.scalars(select(VacationPeriod).where(
+            VacationPeriod.vacation_plan_id == plan.id
+        ).order_by(VacationPeriod.sort_order, VacationPeriod.start_date)).all()
+        periods_by_employee[str(plan.employee_id)] = [
+            {"start_date": p.start_date, "duration_days": p.duration_days}
+            for p in periods
+        ]
+    export_dir = Path(settings.storage_path) / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(template.original_filename).suffix.lower()
+    output_name = f"График_отпусков_{campaign.year}_{campaign_org.organization_id}_v{template.version_number}_{uuid4().hex[:8]}{suffix}"
+    output_path = export_dir / output_name
+    try:
+        result = fill_workbook(
+            template.storage_path,
+            output_path,
+            [
+                {
+                    "sheet_name": r.sheet_name,
+                    "row_number": r.row_number,
+                    "employee_id": str(r.employee_id) if r.employee_id else None,
+                    "employee_name": r.employee_name,
+                }
+                for r in rows if r.mapping_status == "matched"
+            ],
+            periods_by_employee,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Не удалось сформировать Excel: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Ошибка при заполнении Excel-шаблона. Оригинал не изменён.") from exc
+    digest = sha256(output_path.read_bytes()).hexdigest()
+    export = ExportFile(
+        campaign_organization_id=campaign_org.id,
+        template_file_id=template.id,
+        filename=output_name,
+        storage_path=str(output_path),
+        sha256=digest,
+        created_by=user.id,
+    )
+    db.add(export)
+    db.add(AuditLog(
+        user_id=user.id, action="excel.exported", entity_type="export_file",
+        entity_id=export.id,
+        details={
+            "template_version": template.version_number,
+            "filled_rows": result["filled_rows"],
+            "filled_periods": result["filled_periods"],
+            "sha256": digest,
+        },
+    ))
+    db.commit()
+    return RedirectResponse(
+        f"/campaign-organizations/{campaign_org.id}/vacations",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.get("/exports/{export_id}/download")
+def download_excel_export(
+    export_id: UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    export = db.get(ExportFile, export_id)
+    if export is None:
+        raise HTTPException(status_code=404, detail="Файл экспорта не найден.")
+    campaign_org = db.get(CampaignOrganization, export.campaign_organization_id)
+    require_org_access(campaign_org.organization_id, user, db)
+    path = Path(export.storage_path).resolve()
+    export_root = (Path(settings.storage_path) / "exports").resolve()
+    if export_root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=410, detail="Файл экспорта недоступен.")
+    media_type = (
+        "application/vnd.ms-excel.sheet.macroEnabled.12"
+        if path.suffix.lower() == ".xlsm"
+        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    return FileResponse(path, filename=export.filename, media_type=media_type)
 
 
 @app.get("/health")
