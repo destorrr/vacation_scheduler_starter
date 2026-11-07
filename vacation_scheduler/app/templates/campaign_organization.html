@@ -12,6 +12,7 @@
   <section class="card border-0 shadow-sm mb-4"><div class="card-body">
     <h2 class="h5">Excel-шаблон Т-7</h2>
     {% if current_template %}
+      <div class="mb-3"><a class="btn btn-success btn-sm" href="/campaign-organizations/{{ campaign_org.id }}/vacations">Ввод периодов и экспорт Excel</a></div>
       <p class="mb-1">Текущая версия: <strong>v{{ current_template.version_number }}</strong> — {{ current_template.original_filename }}</p>
       <p class="text-secondary small">Оригинал сохранён отдельно и не перезаписывается.</p>
     {% else %}<p class="text-secondary">Шаблон ещё не загружен.</p>{% endif %}

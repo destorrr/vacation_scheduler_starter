@@ -11,7 +11,9 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user, require_org_access, require_roles
-from app.models.entities import (\n    AuditLog, Organization, User, UserOrganization, VacationPlan, VacationPeriod, ExportFile,\n)
+from app.models.entities import (
+    AuditLog, Organization, User, UserOrganization, VacationPlan, VacationPeriod, ExportFile,
+)
 from app.security import csrf_is_valid, hash_password, new_csrf_token, verify_password
 
 app = FastAPI(title=settings.app_name)
@@ -57,6 +59,7 @@ from app.models.entities import (
     Campaign, CampaignOrganization, Employee, TemplateFile, TemplateRow,
 )
 from app.excel.importer import parse_workbook
+from app.excel.exporter import fill_workbook
 
 
 def normalize_person_name(value: str | None) -> str:
