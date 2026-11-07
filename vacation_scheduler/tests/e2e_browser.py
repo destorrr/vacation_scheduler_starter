@@ -39,7 +39,7 @@ def wait_for_app():
 
 def seed_data():
     suffix = uuid4().hex[:8]
-    workbook_path = Path(__file__).resolve().parents[1] / "ГРАФИК ОТПУСКОВ ООО  2026.xlsx"
+    workbook_path = Path(__file__).resolve().parents[2] / "ГРАФИК ОТПУСКОВ ООО  2026.xlsx"
     parsed_rows = parse_workbook(workbook_path)
     names = {}
     for row in parsed_rows:
