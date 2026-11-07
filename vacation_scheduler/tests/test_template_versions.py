@@ -1,0 +1,329 @@
+from hashlib import sha256
+from io import BytesIO
+from pathlib import Path
+from uuid import uuid4
+
+from fastapi.testclient import TestClient
+from openpyxl import Workbook
+from sqlalchemy import select
+
+from app.config import settings
+from app.database import SessionLocal
+from app.main import app
+from app.models.entities import (
+    Campaign, CampaignOrganization, Employee, Organization, TemplateFile,
+    TemplateRow, User,
+)
+from app.security import hash_password
+
+
+def _csrf(response):
+    import re
+    match = re.search(r'name="csrf_token" value="([^"]+)"', response.text)
+    assert match
+    return match.group(1)
+
+
+def _workbook_bytes(column_width: float) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Т-7"
+    sheet.append([
+        "№", "Структурное подразделение", "Должность",
+        "ФИО", "Табельный номер",
+    ])
+    sheet.append([
+        1, "Бухгалтерия", "Бухгалтер",
+        "Иванов Иван Иванович", "00125",
+    ])
+    sheet.column_dimensions["A"].width = column_width
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
+def test_reupload_creates_new_immutable_template_version(tmp_path):
+    suffix = uuid4().hex[:12]
+    password = "Template-Version-Test-2026!"
+    first_bytes = _workbook_bytes(12)
+    second_bytes = _workbook_bytes(18)
+    assert sha256(first_bytes).digest() != sha256(second_bytes).digest()
+
+    with SessionLocal() as db:
+        user = User(
+            username=f"ci-version-{suffix}",
+            full_name="CI Template Version User",
+            password_hash=hash_password(password),
+            role="central_hr",
+            is_active=True,
+        )
+        organization = Organization(name=f"CI Template Version Org {suffix}")
+        db.add_all([user, organization])
+        db.flush()
+        used_years = set(db.scalars(select(Campaign.year)).all())
+        campaign_year = next(year for year in range(2000, 2201) if year not in used_years)
+        campaign = Campaign(
+            year=campaign_year,
+            name=f"CI Template Version Campaign {suffix}",
+            status="draft",
+            created_by=user.id,
+        )
+        db.add(campaign)
+        db.flush()
+        campaign_org = CampaignOrganization(
+            campaign_id=campaign.id,
+            organization_id=organization.id,
+            status="pending",
+        )
+        employee = Employee(
+            organization_id=organization.id,
+            full_name="Иванов Иван Иванович",
+            is_active=True,
+        )
+        db.add_all([campaign_org, employee])
+        db.commit()
+        campaign_org_id = campaign_org.id
+        organization_id = organization.id
+
+    with TestClient(app) as client:
+        login_page = client.get("/login")
+        login = client.post(
+            "/login",
+            data={
+                "username": f"ci-version-{suffix}",
+                "password": password,
+                "csrf_token": _csrf(login_page),
+            },
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
+
+        upload_page = client.get(f"/campaign-organizations/{campaign_org_id}")
+        first_upload = client.post(
+            f"/campaign-organizations/{campaign_org_id}/template",
+            data={"csrf_token": _csrf(upload_page)},
+            files={"file": (
+                "template.xlsx", first_bytes,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )},
+            follow_redirects=False,
+        )
+        assert first_upload.status_code == 303
+
+        second_page = client.get(f"/campaign-organizations/{campaign_org_id}")
+        second_upload = client.post(
+            f"/campaign-organizations/{campaign_org_id}/template",
+            data={"csrf_token": _csrf(second_page)},
+            files={"file": (
+                "template.xlsx", second_bytes,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )},
+            follow_redirects=False,
+        )
+        assert second_upload.status_code == 303
+
+        duplicate_page = client.get(f"/campaign-organizations/{campaign_org_id}")
+        duplicate_upload = client.post(
+            f"/campaign-organizations/{campaign_org_id}/template",
+            data={"csrf_token": _csrf(duplicate_page)},
+            files={"file": (
+                "template.xlsx", second_bytes,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )},
+            follow_redirects=False,
+        )
+        assert duplicate_upload.status_code == 409
+
+    with SessionLocal() as db:
+        versions = db.scalars(
+            select(TemplateFile)
+            .where(TemplateFile.campaign_organization_id == campaign_org_id)
+            .order_by(TemplateFile.version_number)
+        ).all()
+        assert [item.version_number for item in versions] == [1, 2]
+        assert [item.is_current for item in versions] == [False, True]
+        assert [sha256(open(item.storage_path, "rb").read()).digest() for item in versions] == [
+            sha256(first_bytes).digest(),
+            sha256(second_bytes).digest(),
+        ]
+        current_rows = db.scalars(
+            select(TemplateRow).where(TemplateRow.template_file_id == versions[1].id)
+        ).all()
+        assert len(current_rows) == 1
+        assert current_rows[0].employee_id is not None
+        assert current_rows[0].mapping_status == "matched"
+
+
+
+def _workbook_with_headers(headers, employee_rows=()) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Т-7"
+    sheet.append(headers)
+    for row in employee_rows:
+        sheet.append(row)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
+def test_invalid_template_uploads_preserve_current_version_and_clean_temp_files():
+    """Rejected uploads must not replace the current template or leave partial records."""
+    suffix = uuid4().hex[:12]
+    password = "Invalid-Template-Test-2026!"
+    first_bytes = _workbook_bytes(12)
+    invalid_cases = [
+        (
+            "broken.xlsx",
+            b"this is not an Excel workbook",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            422,
+            "Файл не удалось прочитать как книгу Excel",
+        ),
+        (
+            "wrong-headers.xlsx",
+            _workbook_with_headers(["Название", "Дата", "Сумма"], [["Отчёт", "01.01.2026", 10]]),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            422,
+            "Не удалось найти столбец ФИО",
+        ),
+        (
+            "no-employees.xlsx",
+            _workbook_with_headers(["ФИО", "Должность"]),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            422,
+            "Заголовки найдены, но строки сотрудников не обнаружены",
+        ),
+        (
+            "empty.xlsx",
+            b"",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            413,
+            "Файл пустой или превышает лимит 20 МБ",
+        ),
+        (
+            "oversized.xlsx",
+            b"x" * (20 * 1024 * 1024 + 1),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            413,
+            "Файл пустой или превышает лимит 20 МБ",
+        ),
+        (
+            "template.csv",
+            "ФИО;Должность".encode("utf-8"),
+            "text/csv",
+            415,
+            "Поддерживаются файлы .xlsx и .xlsm",
+        ),
+    ]
+
+    with SessionLocal() as db:
+        user = User(
+            username=f"ci-invalid-{suffix}",
+            full_name="CI Invalid Template User",
+            password_hash=hash_password(password),
+            role="central_hr",
+            is_active=True,
+        )
+        organization = Organization(name=f"CI Invalid Template Org {suffix}")
+        db.add_all([user, organization])
+        db.flush()
+        used_years = set(db.scalars(select(Campaign.year)).all())
+        campaign_year = next(year for year in range(2000, 2201) if year not in used_years)
+        campaign = Campaign(
+            year=campaign_year,
+            name=f"CI Invalid Template Campaign {suffix}",
+            status="draft",
+            created_by=user.id,
+        )
+        db.add(campaign)
+        db.flush()
+        campaign_org = CampaignOrganization(
+            campaign_id=campaign.id,
+            organization_id=organization.id,
+            status="pending",
+        )
+        employee = Employee(
+            organization_id=organization.id,
+            full_name="Иванов Иван Иванович",
+            is_active=True,
+        )
+        db.add_all([campaign_org, employee])
+        db.commit()
+        campaign_org_id = campaign_org.id
+
+    with TestClient(app) as client:
+        login_page = client.get("/login")
+        login = client.post(
+            "/login",
+            data={
+                "username": f"ci-invalid-{suffix}",
+                "password": password,
+                "csrf_token": _csrf(login_page),
+            },
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
+
+        initial_page = client.get(f"/campaign-organizations/{campaign_org_id}")
+        initial_upload = client.post(
+            f"/campaign-organizations/{campaign_org_id}/template",
+            data={"csrf_token": _csrf(initial_page)},
+            files={"file": (
+                "valid.xlsx",
+                first_bytes,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )},
+            follow_redirects=False,
+        )
+        assert initial_upload.status_code == 303
+
+        for filename, content, content_type, expected_status, expected_detail in invalid_cases:
+            page = client.get(f"/campaign-organizations/{campaign_org_id}")
+            response = client.post(
+                f"/campaign-organizations/{campaign_org_id}/template",
+                data={"csrf_token": _csrf(page)},
+                files={"file": (filename, content, content_type)},
+                follow_redirects=False,
+            )
+            assert response.status_code == expected_status, filename
+            assert expected_detail in response.text, filename
+
+        # Browser form submissions return to the page with a readable alert.
+        page = client.get(f"/campaign-organizations/{campaign_org_id}")
+        browser_response = client.post(
+            f"/campaign-organizations/{campaign_org_id}/template",
+            data={"csrf_token": _csrf(page)},
+            files={"file": (
+                "wrong-headers.xlsx",
+                _workbook_with_headers(["Название", "Дата", "Сумма"]),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )},
+            headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert browser_response.status_code == 303
+        assert "upload_error=" in browser_response.headers["location"]
+        error_page = client.get(browser_response.headers["location"])
+        assert error_page.status_code == 200
+        assert "alert-danger" in error_page.text
+        assert "Не удалось найти столбец ФИО" in error_page.text
+
+    with SessionLocal() as db:
+        versions = db.scalars(
+            select(TemplateFile)
+            .where(TemplateFile.campaign_organization_id == campaign_org_id)
+            .order_by(TemplateFile.version_number)
+        ).all()
+        assert len(versions) == 1
+        assert versions[0].version_number == 1
+        assert versions[0].is_current is True
+        assert sha256(open(versions[0].storage_path, "rb").read()).digest() == sha256(first_bytes).digest()
+        rows = db.scalars(
+            select(TemplateRow).where(TemplateRow.template_file_id == versions[0].id)
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].employee_id is not None
+        assert list((Path(settings.storage_path) / "temp").glob("*")) == []

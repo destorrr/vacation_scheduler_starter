@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Кампании — {{ app_name }}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<nav class="navbar bg-white border-bottom"><div class="container"><a class="navbar-brand" href="/">{{ app_name }}</a><a class="btn btn-outline-secondary btn-sm" href="/">На главную</a></div></nav>
+<main class="container py-4">
+  <h1 class="h3 mb-4">Графики отпусков</h1>
+  {% if user.role == "central_hr" %}
+  <section class="card border-0 shadow-sm mb-4"><div class="card-body">
+    <h2 class="h5">Создать кампанию</h2>
+    <form method="post" action="/campaigns" class="row g-3">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="col-md-2"><label class="form-label" for="year">Год</label><input class="form-control" id="year" name="year" type="number" min="2000" max="2200" value="{{ now_year }}" required></div>
+      <div class="col-md-4"><label class="form-label" for="campaign-name">Название</label><input class="form-control" id="campaign-name" name="name" value="График отпусков" maxlength="255" required></div>
+      <div class="col-md-4"><label class="form-label" for="orgs">Организации</label><select class="form-select" id="orgs" name="organization_ids" multiple size="3" required>{% for org in organizations %}<option value="{{ org.id }}">{{ org.name }}</option>{% endfor %}</select></div>
+      <div class="col-md-2 d-flex align-items-end"><button class="btn btn-primary w-100" type="submit">Создать</button></div>
+    </form>
+  </div></section>
+  {% endif %}
+  <h2 class="h5">Существующие кампании</h2>
+  {% if campaign_rows %}
+  <div class="list-group">{% for campaign_org, campaign, organization in campaign_rows %}
+    <a class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" href="/campaign-organizations/{{ campaign_org.id }}">
+      <span><strong>{{ campaign.year }} — {{ campaign.name }}</strong><br><span class="text-secondary">{{ organization.name }}</span></span>
+      <span class="badge text-bg-light">{{ campaign_org.status }}</span>
+    </a>
+  {% endfor %}</div>
+  {% else %}<p class="text-secondary">Кампаний пока нет.</p>{% endif %}
+</main>
+</body></html>

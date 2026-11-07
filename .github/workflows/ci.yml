@@ -1,0 +1,192 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: vacation_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d vacation_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/vacation_test
+      SECRET_KEY: ci-only-secret-key-that-is-long-enough-for-tests
+      STORAGE_PATH: /tmp/vacation-scheduler-test-storage
+      PYTHONPATH: .
+    defaults:
+      run:
+        working-directory: vacation_scheduler
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: vacation_scheduler/requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Apply database migrations
+        run: alembic upgrade head
+      - name: Run unit and PostgreSQL integration tests
+        run: pytest -q
+      - name: Install Chromium for browser tests
+        run: |
+          pip install -r requirements-e2e.txt
+          playwright install --with-deps chromium
+      - name: Start application for browser tests
+        run: |
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/vacation-scheduler-uvicorn.log 2>&1 &
+          echo $! > /tmp/vacation-scheduler-uvicorn.pid
+          python - <<'PY'
+          import time
+          from urllib.request import urlopen
+          for _ in range(60):
+              try:
+                  with urlopen("http://127.0.0.1:8000/health", timeout=2) as response:
+                      if response.status == 200:
+                          break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise SystemExit("Application did not start")
+          PY
+      - name: Run real Chromium user workflow
+        run: python tests/e2e_browser.py
+      - name: Validate production Docker Compose configuration
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          rm .env
+      - name: Validate Nginx reverse proxy configuration
+        run: |
+          sed 's/app:8000/127.0.0.1:8000/g' deploy/nginx.conf > /tmp/nginx-ci.conf
+          docker run --rm \
+            -v "/tmp/nginx-ci.conf:/etc/nginx/conf.d/default.conf:ro" \
+            nginx:stable-alpine nginx -t
+      - name: Validate official Docker apt installation on Ubuntu and Debian
+        run: |
+          for image in ubuntu:24.04 debian:12 debian:13; do
+            echo "Checking Docker packages on $image"
+            docker run --rm -i "$image" sh -s <<'INSTALL'
+          set -eu
+          . /etc/os-release
+          case "$ID" in
+            ubuntu)
+              repo="https://download.docker.com/linux/ubuntu"
+              suite="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+              ;;
+            debian)
+              repo="https://download.docker.com/linux/debian"
+              suite="$VERSION_CODENAME"
+              ;;
+            *)
+              echo "Unsupported distribution: $ID" >&2
+              exit 1
+              ;;
+          esac
+          apt-get update
+          apt-get install -y ca-certificates curl
+          install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL "$repo/gpg" -o /etc/apt/keyrings/docker.asc
+          chmod a+r /etc/apt/keyrings/docker.asc
+          cat > /etc/apt/sources.list.d/docker.sources <<EOF
+          Types: deb
+          URIs: $repo
+          Suites: $suite
+          Components: stable
+          Architectures: $(dpkg --print-architecture)
+          Signed-By: /etc/apt/keyrings/docker.asc
+          EOF
+          apt-get update
+          # Prevent package maintainer scripts from trying to start a daemon in this test container.
+          printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+          chmod +x /usr/sbin/policy-rc.d
+          DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          docker --version
+          docker compose version
+          INSTALL
+          done
+      - name: Build application Docker image
+        run: docker build -t vacation-scheduler:ci .
+      - name: Smoke test the production Compose stack
+        run: |
+          trap 'docker compose down -v --remove-orphans || true; rm -f .env' EXIT
+          cp .env.example .env
+          sed -i "s|^SECRET_KEY=.*|SECRET_KEY=$(openssl rand -hex 32)|" .env
+          sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 32)|" .env
+          mkdir -p storage
+          sudo chown -R 10001:10001 storage
+          docker compose up -d --build
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8080/health; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail http://127.0.0.1:8080/health
+          for attempt in $(seq 1 30); do
+            nginx_id="$(docker compose ps -q nginx)"
+            nginx_health="$(docker inspect --format '{{.State.Health.Status}}' "$nginx_id")"
+            if [ "$nginx_health" = "healthy" ]; then
+              break
+            fi
+            sleep 2
+          done
+          test "$nginx_health" = "healthy"
+          docker compose ps
+          docker compose exec -T app alembic upgrade head
+
+          # Verify that the production backup script captures both PostgreSQL and uploaded files.
+          sudo mkdir -p storage/originals
+          mkdir -p backups
+          printf '%s\n' 'original-file-before-backup' | sudo tee storage/originals/backup-restore-probe.txt >/dev/null
+          docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+          CREATE TABLE backup_restore_probe (marker text NOT NULL);
+          INSERT INTO backup_restore_probe VALUES ('before-backup');
+          SQL
+          sh scripts/backup.sh
+          db_backup="$(find backups -maxdepth 1 -name 'postgres-*.sql.gz' -print -quit)"
+          storage_backup="$(find backups -maxdepth 1 -name 'storage-*.tar.gz' -print -quit)"
+          test -n "$db_backup"
+          test -n "$storage_backup"
+
+          # Restore the dump into a clean database, leaving the running app database untouched.
+          echo "RESTORE CHECK 1/5: create isolated database"
+          docker compose exec -T db sh -c 'createdb -T template0 -U "$POSTGRES_USER" vacation_restore_test'
+          echo "RESTORE CHECK 2/5: apply PostgreSQL dump"
+          set -o pipefail
+          if ! gunzip -c "$db_backup" | docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 --echo-errors -U "$POSTGRES_USER" vacation_restore_test' > /tmp/restore-test.log 2>&1; then
+            tail -n 80 /tmp/restore-test.log
+            exit 1
+          fi
+          echo "RESTORE CHECK 3/5: restore storage archive"
+          sudo rm storage/originals/backup-restore-probe.txt
+          sudo tar -xzf "$storage_backup" -C .
+          restored_file="$(sudo cat storage/originals/backup-restore-probe.txt 2>&1)" || { echo "Storage file missing after restore: $restored_file"; exit 1; }
+          printf 'Restored storage content: <%s>\n' "$restored_file"
+          if [ "$restored_file" != "original-file-before-backup" ]; then
+            echo "Storage content does not match the pre-backup marker."
+            exit 1
+          fi
+          echo "RESTORE CHECK 4/5: verify database marker"
+          restored_marker="$(docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" vacation_restore_test -c "SELECT marker FROM backup_restore_probe"')"
+          printf 'Restored database marker: <%s>\n' "$restored_marker"
+          if [ "$restored_marker" != "before-backup" ]; then
+            echo "Database marker does not match the pre-backup value."
+            exit 1
+          fi
+          echo "RESTORE CHECK 5/5: all backup/restore checks passed."

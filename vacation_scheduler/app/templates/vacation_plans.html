@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Периоды отпусков — {{ organization.name }}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<nav class="navbar bg-white border-bottom"><div class="container"><a class="navbar-brand" href="/campaign-organizations/{{ campaign_org.id }}">{{ organization.name }}</a><a class="btn btn-outline-secondary btn-sm" href="/campaigns">К кампаниям</a></div></nav>
+<main class="container py-4">
+  <h1 class="h3">Периоды отпусков</h1><p class="text-secondary">{{ campaign.year }} · Вводите периоды один раз на сотрудника — они попадут во все связанные строки Т-7.</p>
+  {% if unresolved_count %}
+    <div class="alert alert-warning">В шаблоне осталось несопоставленных строк: {{ unresolved_count }}. Сначала сопоставьте их или отметьте как игнорируемые — экспорт пока заблокирован.</div>
+  {% endif %}
+  {% if campaign.status not in ["closed", "archived"] %}
+  <form method="post" action="/campaign-organizations/{{ campaign_org.id }}/export" class="mb-3">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn btn-success" type="submit" {% if unresolved_count %}disabled{% endif %}>Сформировать Excel по оригинальному шаблону</button>
+  </form>
+  {% endif %}
+  {% if exports %}
+  <section class="card border-0 shadow-sm mb-4"><div class="card-body">
+    <h2 class="h5">Готовые файлы</h2>
+    <ul class="mb-0">{% for item in exports %}<li><a href="/exports/{{ item.id }}/download">{{ item.filename }}</a> <span class="text-secondary small">{{ item.created_at }}</span></li>{% endfor %}</ul>
+  </div></section>
+  {% endif %}
+  {% for employee, periods in employee_periods %}
+  <section class="card border-0 shadow-sm mb-3"><div class="card-body">
+    <div class="d-flex justify-content-between flex-wrap gap-2"><div><h2 class="h5 mb-1">{{ employee.full_name }}</h2><div class="small text-secondary">Строк Т-7 с этим ФИО: {{ employee.row_count }}</div></div></div>
+    {% if periods %}
+    <div class="table-responsive mt-3"><table class="table table-sm align-middle"><thead><tr><th>Начало</th><th>Окончание</th><th>Календарных дней</th><th></th></tr></thead><tbody>
+      {% for period in periods %}<tr><td>{{ period.start_date.strftime("%d.%m.%Y") }}</td><td>{{ period.end_date.strftime("%d.%m.%Y") }}</td><td>{{ period.duration_days }}</td><td class="text-end">
+        {% if campaign.status not in ["closed", "archived"] %}<form method="post" action="/vacation-periods/{{ period.id }}/delete"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-sm btn-outline-danger" type="submit">Удалить</button></form>{% endif %}
+      </td></tr>{% endfor %}
+    </tbody></table></div>
+    {% else %}<p class="text-secondary small mt-2 mb-2">Периоды пока не добавлены.</p>{% endif %}
+    {% if campaign.status not in ["closed", "archived"] %}
+    <form method="post" action="/campaign-organizations/{{ campaign_org.id }}/employees/{{ employee.id }}/periods" class="row g-2 align-items-end mt-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="col-sm-4"><label class="form-label small">Дата начала</label><input class="form-control" type="date" name="start_date" required></div>
+      <div class="col-sm-4"><label class="form-label small">Дата окончания</label><input class="form-control" type="date" name="end_date" required></div>
+      <div class="col-sm-4"><button class="btn btn-primary" type="submit">Добавить период</button></div>
+    </form>
+    {% endif %}
+  </div></section>
+  {% else %}
+    <p class="text-secondary">Нет сопоставленных сотрудников. Сначала загрузите шаблон Т-7 и сопоставьте строки.</p>
+  {% endfor %}
+</main>
+</body></html>
