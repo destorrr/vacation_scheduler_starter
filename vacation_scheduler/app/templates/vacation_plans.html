@@ -26,7 +26,7 @@
   {% endif %}
   {% for employee, periods in employee_periods %}
   <section class="card border-0 shadow-sm mb-3"><div class="card-body">
-    <div class="d-flex justify-content-between flex-wrap gap-2"><div><h2 class="h5 mb-1">{{ employee.full_name }}</h2><div class="small text-secondary">{% if employee.personnel_number %}Табельный № {{ employee.personnel_number }} · {% endif %}строк Т-7: {{ employee.row_count }}</div></div></div>
+    <div class="d-flex justify-content-between flex-wrap gap-2"><div><h2 class="h5 mb-1">{{ employee.full_name }}</h2><div class="small text-secondary">Строк Т-7 с этим ФИО: {{ employee.row_count }}</div></div></div>
     {% if periods %}
     <div class="table-responsive mt-3"><table class="table table-sm align-middle"><thead><tr><th>Начало</th><th>Окончание</th><th>Календарных дней</th><th></th></tr></thead><tbody>
       {% for period in periods %}<tr><td>{{ period.start_date.strftime("%d.%m.%Y") }}</td><td>{{ period.end_date.strftime("%d.%m.%Y") }}</td><td>{{ period.duration_days }}</td><td class="text-end">

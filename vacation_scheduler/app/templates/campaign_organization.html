@@ -44,7 +44,7 @@
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <select class="form-select form-select-sm" name="employee_id" required>
                 <option value="">Выбрать сотрудника…</option>
-                {% for emp in employees %}<option value="{{ emp.id }}">{{ emp.full_name }}{% if emp.personnel_number %} · {{ emp.personnel_number }}{% endif %}</option>{% endfor %}
+                {% for emp in employees %}<option value="{{ emp.id }}">{{ emp.full_name }}</option>{% endfor %}
               </select><button class="btn btn-sm btn-outline-primary" type="submit">Связать</button>
             </form>
             {% if row.mapping_status == "needs_review" %}<span class="badge text-bg-warning">Неоднозначное совпадение</span>{% else %}<span class="badge text-bg-secondary">Не сопоставлено</span>{% endif %}

@@ -71,27 +71,19 @@ def normalize_person_name(value: str | None) -> str:
 
 
 def map_sibling_rows(db: Session, template: TemplateFile, source_row: TemplateRow, employee: Employee) -> int:
+    """Map every row with the same normalized full name, regardless of job tab number."""
+    source_name = normalize_person_name(source_row.employee_name)
+    if not source_name:
+        return 0
     siblings = db.scalars(
         select(TemplateRow).where(
             TemplateRow.template_file_id == template.id,
-            TemplateRow.employee_id.is_(None),
+            TemplateRow.id != source_row.id,
         )
     ).all()
     mapped = 0
-    source_number = (source_row.personnel_number or "").strip().casefold()
-    source_name = normalize_person_name(source_row.employee_name)
     for sibling in siblings:
-        sibling_number = (sibling.personnel_number or "").strip().casefold()
-        same_person = (
-            bool(source_number and sibling_number and source_number == sibling_number)
-            or (
-                not source_number
-                and not sibling_number
-                and bool(source_name)
-                and source_name == normalize_person_name(sibling.employee_name)
-            )
-        )
-        if same_person:
+        if normalize_person_name(sibling.employee_name) == source_name:
             sibling.employee_id = employee.id
             sibling.mapping_status = "matched"
             mapped += 1
@@ -279,32 +271,25 @@ async def upload_template(
     )
     db.add(template)
     db.flush()
-    employee_by_number = {}
     employees = db.scalars(select(Employee).where(
         Employee.organization_id == campaign_org.organization_id,
         Employee.is_active.is_(True),
-    )).all()
+    ).order_by(Employee.created_at, Employee.id)).all()
+    # FIO is the only identity key. Personnel numbers belong to individual
+    # position rows and must never participate in employee matching.
+    employee_by_name = {}
     for employee in employees:
-        if employee.personnel_number:
-            employee_by_number.setdefault(employee.personnel_number.strip().casefold(), []).append(employee)
-    employee_by_name = defaultdict(list)
-    for employee in employees:
-        employee_by_name[normalize_person_name(employee.full_name)].append(employee)
+        normalized_name = normalize_person_name(employee.full_name)
+        if normalized_name:
+            employee_by_name.setdefault(normalized_name, employee)
 
     matched_count = 0
     review_count = 0
     for row in parsed_rows:
-        matches = []
-        if row["personnel_number"]:
-            matches = employee_by_number.get(row["personnel_number"].strip().casefold(), [])
-        if not matches:
-            matches = employee_by_name.get(normalize_person_name(row["employee_name"]), [])
-        mapped_employee = matches[0] if len(matches) == 1 else None
-        mapping_status = "matched" if mapped_employee else ("needs_review" if len(matches) > 1 else "unmatched")
+        mapped_employee = employee_by_name.get(normalize_person_name(row["employee_name"]))
+        mapping_status = "matched" if mapped_employee else "unmatched"
         if mapped_employee:
             matched_count += 1
-        elif mapping_status == "needs_review":
-            review_count += 1
         db.add(TemplateRow(
             template_file_id=template.id,
             employee_id=mapped_employee.id if mapped_employee else None,
@@ -389,30 +374,22 @@ def create_employee_from_template_row(
         raise HTTPException(status_code=409, detail="Кампания закрыта для изменений.")
     if row.employee_id:
         raise HTTPException(status_code=409, detail="Строка уже сопоставлена с сотрудником.")
-    employee = None
-    if row.personnel_number:
-        employee = db.scalar(select(Employee).where(
-            Employee.organization_id == campaign_org.organization_id,
-            Employee.personnel_number == row.personnel_number,
-        ))
-    if employee is None and not row.personnel_number:
-        name_matches = db.scalars(select(Employee).where(
-            Employee.organization_id == campaign_org.organization_id,
-            Employee.is_active.is_(True),
-        )).all()
-        exact_matches = [
-            item for item in name_matches
-            if normalize_person_name(item.full_name) == normalize_person_name(row.employee_name)
-        ]
-        if len(exact_matches) == 1:
-            employee = exact_matches[0]
-        elif len(exact_matches) > 1:
-            raise HTTPException(status_code=409, detail="Найдено несколько сотрудников с таким ФИО. Выберите существующего сотрудника вручную.")
+    normalized_name = normalize_person_name(row.employee_name)
+    if not normalized_name:
+        raise HTTPException(status_code=422, detail="В строке отсутствует корректное ФИО.")
+    existing_employees = db.scalars(select(Employee).where(
+        Employee.organization_id == campaign_org.organization_id,
+        Employee.is_active.is_(True),
+    ).order_by(Employee.created_at, Employee.id)).all()
+    employee = next(
+        (item for item in existing_employees
+         if normalize_person_name(item.full_name) == normalized_name),
+        None,
+    )
     created = employee is None
     if created:
         employee = Employee(
             organization_id=campaign_org.organization_id,
-            personnel_number=row.personnel_number,
             full_name=row.employee_name,
             is_active=True,
         )

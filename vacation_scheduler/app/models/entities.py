@@ -1,6 +1,6 @@
 import uuid
 from datetime import date, datetime
-from sqlalchemy import Boolean, CheckConstraint, Computed, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, String, UniqueConstraint, func
+from sqlalchemy import Boolean, CheckConstraint, Computed, Date, DateTime, ForeignKey, ForeignKeyConstraint, Integer, JSON, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
@@ -36,11 +36,10 @@ class Employee(Base):
     __tablename__ = 'employees'
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uid)
     organization_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('organizations.id', ondelete='RESTRICT'), nullable=False)
-    personnel_number: Mapped[str | None] = mapped_column(String(50))
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    __table_args__ = (UniqueConstraint('id','organization_id',name='uq_employees_id_org'), Index('uq_employee_org_personnel_number','organization_id','personnel_number',unique=True,postgresql_where=personnel_number.is_not(None)))
+    __table_args__ = (UniqueConstraint('id','organization_id',name='uq_employees_id_org'),)
 
 class Campaign(Base):
     __tablename__ = 'campaigns'
