@@ -109,7 +109,7 @@ def main():
             db.commit()
 
         page.get_by_label("Логин").fill(responsible_username)
-        page.get_by_label("ФИО").fill("Browser Test Responsible")
+        page.locator("#new-full-name").fill("Browser Test Responsible")
         page.get_by_label("Временный пароль").fill(PASSWORD)
         page.locator("#new-orgs").select_option(label=data["allowed_name"])
         page.get_by_role("button", name="Создать пользователя").click()
