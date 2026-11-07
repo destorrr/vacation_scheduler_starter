@@ -67,6 +67,9 @@ def parse_workbook(source: str | Path) -> list[dict]:
     detected_sheets = 0
     try:
         for ws in workbook.worksheets:
+            # Hidden and very-hidden worksheets are not part of the visible T-7 input.
+            if ws.sheet_state != "visible":
+                continue
             header = detect_header(ws)
             if not header:
                 continue
