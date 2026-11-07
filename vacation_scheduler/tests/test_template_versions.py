@@ -61,8 +61,10 @@ def test_reupload_creates_new_immutable_template_version(tmp_path):
         organization = Organization(name=f"CI Template Version Org {suffix}")
         db.add_all([user, organization])
         db.flush()
+        used_years = set(db.scalars(select(Campaign.year)).all())
+        campaign_year = next(year for year in range(2000, 2201) if year not in used_years)
         campaign = Campaign(
-            year=2000 + (int(suffix[:6], 16) % 201),
+            year=campaign_year,
             name=f"CI Template Version Campaign {suffix}",
             status="draft",
             created_by=user.id,
@@ -228,8 +230,10 @@ def test_invalid_template_uploads_preserve_current_version_and_clean_temp_files(
         organization = Organization(name=f"CI Invalid Template Org {suffix}")
         db.add_all([user, organization])
         db.flush()
+        used_years = set(db.scalars(select(Campaign.year)).all())
+        campaign_year = next(year for year in range(2000, 2201) if year not in used_years)
         campaign = Campaign(
-            year=2000 + (int(suffix[:6], 16) % 201),
+            year=campaign_year,
             name=f"CI Invalid Template Campaign {suffix}",
             status="draft",
             created_by=user.id,
