@@ -9,6 +9,24 @@ on:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: vacation_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d vacation_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/vacation_test
+      SECRET_KEY: ci-only-secret-key-that-is-long-enough-for-tests
+      STORAGE_PATH: /tmp/vacation-scheduler-test-storage
     defaults:
       run:
         working-directory: vacation_scheduler
@@ -20,4 +38,9 @@ jobs:
           cache: pip
           cache-dependency-path: vacation_scheduler/requirements.txt
       - run: pip install -r requirements.txt
-      - run: pytest -q
+      - name: Apply database migrations
+        run: alembic upgrade head
+      - name: Run unit and PostgreSQL integration tests
+        run: pytest -q
+      - name: Build application Docker image
+        run: docker build -t vacation-scheduler:ci .
