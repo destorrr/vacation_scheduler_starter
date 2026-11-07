@@ -164,7 +164,7 @@ sh scripts/backup.sh
 
 ```bash
 docker compose stop app nginx
-docker compose exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$POSTGRES_DB" && createdb -U "$POSTGRES_USER" "$POSTGRES_DB"'
+docker compose exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$POSTGRES_DB" && createdb -T template0 -U "$POSTGRES_USER" "$POSTGRES_DB"'
 gunzip -c backups/postgres-YYYYMMDDTHHMMSSZ.sql.gz | docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"'
 tar -xzf backups/storage-YYYYMMDDTHHMMSSZ.tar.gz -C .
 sudo chown -R 10001:10001 storage
