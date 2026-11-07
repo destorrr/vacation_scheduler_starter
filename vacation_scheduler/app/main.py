@@ -354,6 +354,42 @@ def map_template_row(
     )
 
 
+@app.post("/template-rows/{row_id}/ignore")
+def ignore_template_row(
+    row_id: UUID,
+    request: Request,
+    csrf_token: str = Form(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token)
+    row = db.get(TemplateRow, row_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Строка шаблона не найдена.")
+    template = db.get(TemplateFile, row.template_file_id)
+    campaign_org = db.get(CampaignOrganization, template.campaign_organization_id)
+    require_org_access(campaign_org.organization_id, user, db)
+    campaign = db.get(Campaign, campaign_org.campaign_id)
+    if campaign.status in {"closed", "archived"}:
+        raise HTTPException(status_code=409, detail="Кампания закрыта для изменений.")
+    if row.mapping_status not in {"unmatched", "needs_review"}:
+        raise HTTPException(status_code=409, detail="Можно исключить только несопоставленную строку.")
+    row.employee_id = None
+    row.mapping_status = "ignored"
+    db.add(AuditLog(
+        user_id=user.id,
+        action="template_row.ignored",
+        entity_type="template_row",
+        entity_id=row.id,
+        details={"template_file_id": str(template.id), "row_number": row.row_number},
+    ))
+    db.commit()
+    return RedirectResponse(
+        f"/campaign-organizations/{campaign_org.id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
 @app.post("/template-rows/{row_id}/create-employee")
 def create_employee_from_template_row(
     row_id: UUID,
