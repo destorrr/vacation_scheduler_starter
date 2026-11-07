@@ -119,3 +119,203 @@ def test_postgres_migrations_and_authenticated_http_workflow():
         campaigns = client.get("/campaigns")
         assert campaigns.status_code == 200
         assert "CI integration campaign" in campaigns.text
+
+
+
+def test_reference_t7_http_upload_vacation_entry_and_excel_download(tmp_path):
+    """Run the real T-7 workbook through upload, matching, period entry and download."""
+    from collections import defaultdict
+    from datetime import date
+    from hashlib import sha256
+    from io import BytesIO
+    from pathlib import Path
+
+    from openpyxl import load_workbook
+
+    from app.excel.importer import parse_workbook
+    from app.main import normalize_person_name
+    from app.models.entities import (
+        CampaignOrganization, Employee, ExportFile, TemplateFile, TemplateRow,
+        VacationPeriod, VacationPlan,
+    )
+
+    template_path = Path(__file__).resolve().parents[2] / "ГРАФИК ОТПУСКОВ ООО  2026.xlsx"
+    template_bytes = template_path.read_bytes()
+    original_digest = sha256(template_bytes).hexdigest()
+    parsed = parse_workbook(template_path)
+
+    grouped = defaultdict(list)
+    for row in parsed:
+        grouped[normalize_person_name(row["employee_name"])].append(row)
+    target_group = next(
+        (rows for name, rows in grouped.items()
+         if name and len(rows) > 1
+         and len({row["personnel_number"] for row in rows}) > 1),
+        None,
+    )
+    assert target_group, "The reference workbook must include a person with multiple personnel numbers"
+    target_name = target_group[0]["employee_name"]
+    target_rows = [row for row in target_group]
+
+    suffix = uuid4().hex[:10]
+    username = f"ci-t7-{suffix}"
+    password = "Integration-Test-Password-2026!"
+    with SessionLocal() as db:
+        admin = User(
+            username=username,
+            full_name="CI T7 Central HR",
+            password_hash=hash_password(password),
+            role="central_hr",
+            is_active=True,
+        )
+        organization = Organization(name=f"CI T7 Organization {suffix}")
+        db.add_all([admin, organization])
+        db.flush()
+
+        # Pre-create one employee per distinct normalized FIO in this legal entity.
+        employee_by_name = {}
+        for row in parsed:
+            normalized = normalize_person_name(row["employee_name"])
+            if normalized and normalized not in employee_by_name:
+                employee = Employee(
+                    organization_id=organization.id,
+                    full_name=row["employee_name"],
+                    is_active=True,
+                )
+                db.add(employee)
+                employee_by_name[normalized] = employee
+        target_employee_id = employee_by_name[normalize_person_name(target_name)].id
+        organization_id = organization.id
+        db.commit()
+
+    with TestClient(app) as client:
+        _login(client, username, password)
+
+        campaign_page = client.get("/campaigns")
+        created_campaign = client.post(
+            "/campaigns",
+            data={
+                "year": "2091",
+                "name": "CI real T-7 workflow",
+                "organization_ids": [str(organization_id)],
+                "csrf_token": _csrf_token(campaign_page),
+            },
+            follow_redirects=False,
+        )
+        assert created_campaign.status_code == 303
+
+        with SessionLocal() as db:
+            campaign_org = db.scalar(
+                select(CampaignOrganization).where(
+                    CampaignOrganization.organization_id == organization_id
+                )
+            )
+            campaign_org_id = campaign_org.id
+
+        upload_page = client.get(f"/campaign-organizations/{campaign_org_id}")
+        uploaded = client.post(
+            f"/campaign-organizations/{campaign_org_id}/template",
+            data={"csrf_token": _csrf_token(upload_page)},
+            files={
+                "file": (
+                    "ГРАФИК ОТПУСКОВ ООО  2026.xlsx",
+                    template_bytes,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+            follow_redirects=False,
+        )
+        assert uploaded.status_code == 303
+
+        with SessionLocal() as db:
+            template = db.scalar(
+                select(TemplateFile).where(
+                    TemplateFile.campaign_organization_id == campaign_org_id,
+                    TemplateFile.is_current.is_(True),
+                )
+            )
+            assert template is not None
+            template_id = template.id
+            mapped_rows = db.scalars(
+                select(TemplateRow).where(
+                    TemplateRow.template_file_id == template_id,
+                    TemplateRow.employee_id == target_employee_id,
+                    TemplateRow.mapping_status == "matched",
+                ).order_by(TemplateRow.row_number)
+            ).all()
+            assert len(mapped_rows) == len(target_rows)
+            assert {row.personnel_number for row in mapped_rows} == {
+                row["personnel_number"] for row in target_rows
+            }
+
+        vacations_page = client.get(
+            f"/campaign-organizations/{campaign_org_id}/vacations"
+        )
+        assert vacations_page.status_code == 200
+        csrf = _csrf_token(vacations_page)
+        for start, end in (("2027-03-01", "2027-03-14"), ("2027-09-01", "2027-09-07")):
+            response = client.post(
+                f"/campaign-organizations/{campaign_org_id}/employees/{target_employee_id}/periods",
+                data={"start_date": start, "end_date": end, "csrf_token": csrf},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+
+        with SessionLocal() as db:
+            plans = db.scalars(
+                select(VacationPlan).where(
+                    VacationPlan.campaign_organization_id == campaign_org_id,
+                    VacationPlan.employee_id == target_employee_id,
+                )
+            ).all()
+            assert len(plans) == 1
+            periods = db.scalars(
+                select(VacationPeriod).where(
+                    VacationPeriod.vacation_plan_id == plans[0].id
+                ).order_by(VacationPeriod.start_date)
+            ).all()
+            assert [(p.start_date, p.end_date, p.duration_days) for p in periods] == [
+                (date(2027, 3, 1), date(2027, 3, 14), 14),
+                (date(2027, 9, 1), date(2027, 9, 7), 7),
+            ]
+
+        export_page = client.get(
+            f"/campaign-organizations/{campaign_org_id}/vacations"
+        )
+        exported = client.post(
+            f"/campaign-organizations/{campaign_org_id}/export",
+            data={"csrf_token": _csrf_token(export_page)},
+            follow_redirects=False,
+        )
+        assert exported.status_code == 303
+
+        with SessionLocal() as db:
+            export = db.scalar(
+                select(ExportFile).where(
+                    ExportFile.campaign_organization_id == campaign_org_id
+                )
+            )
+            assert export is not None
+            export_id = export.id
+
+        downloaded = client.get(f"/exports/{export_id}/download")
+        assert downloaded.status_code == 200
+        result_wb = load_workbook(BytesIO(downloaded.content), data_only=False)
+        result_ws = result_wb["TDSheet"]
+        for row in target_rows:
+            row_number = row["row_number"]
+            assert result_ws[f"D{row_number}"].value == row["personnel_number"]
+            assert result_ws[f"E{row_number}"].value == 21
+            assert result_ws[f"G{row_number}"].value == (
+                "01.03.2027 (14) 01.09.2027 (7)"
+            )
+            assert f"E{row_number}:F{row_number}" in {
+                str(item) for item in result_ws.merged_cells.ranges
+            }
+        result_wb.close()
+
+    # The uploaded original is stored as a separate immutable file.
+    with SessionLocal() as db:
+        saved_template = db.get(TemplateFile, template_id)
+        assert Path(saved_template.storage_path).read_bytes() == template_bytes
+    assert sha256(template_path.read_bytes()).hexdigest() == original_digest
