@@ -40,9 +40,9 @@ def test_export_fills_periods_and_preserves_original(tmp_path):
     wb = load_workbook(output)
     ws = wb["График"]
     assert ws["E2"].value == 14
-    assert ws["F2"].value == date(2027, 3, 1)
+    assert ws["F2"].value.date() == date(2027, 3, 1)
     assert ws["G2"].value == 7
-    assert ws["H2"].value == date(2027, 9, 1)
+    assert ws["H2"].value.date() == date(2027, 9, 1)
     assert "A3:A4" in {str(item) for item in ws.merged_cells.ranges}
     original = load_workbook(source)
     assert original["График"]["E2"].value is None
