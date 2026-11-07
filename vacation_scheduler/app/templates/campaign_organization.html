@@ -9,6 +9,12 @@
 <nav class="navbar bg-white border-bottom"><div class="container"><a class="navbar-brand" href="/campaigns">Кампании</a><a class="btn btn-outline-secondary btn-sm" href="/">На главную</a></div></nav>
 <main class="container py-4">
   <h1 class="h3">{{ organization.name }}</h1><p class="text-secondary">{{ campaign.name }} · {{ campaign.year }}</p>
+  {% if upload_error %}
+  <div class="alert alert-danger alert-dismissible fade show" role="alert" aria-live="polite">
+    <strong>Не удалось загрузить шаблон.</strong> {{ upload_error }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Закрыть"></button>
+  </div>
+  {% endif %}
   <section class="card border-0 shadow-sm mb-4"><div class="card-body">
     <h2 class="h5">Excel-шаблон Т-7</h2>
     {% if current_template %}
@@ -70,4 +76,5 @@
   {% else %}<p class="text-secondary">В шаблоне не обнаружены строки сотрудников.</p>{% endif %}
   {% endif %}
 </main>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body></html>
