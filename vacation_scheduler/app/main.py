@@ -314,7 +314,7 @@ async def upload_template(
             row_number=row["row_number"],
             department_name=row["department_name"],
             position_name=row["position_name"],
-            employee_name=row["employee_name"],
+            employee_name=clean_person_name(row["employee_name"]),
             personnel_number=row["personnel_number"],
             mapping_status=mapping_status,
         ))
