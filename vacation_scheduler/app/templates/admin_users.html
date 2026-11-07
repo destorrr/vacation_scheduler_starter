@@ -100,7 +100,7 @@
                   <label class="form-label" for="orgs-{{ item.id }}">Доступные организации</label>
                   <select class="form-select" id="orgs-{{ item.id }}" name="organization_ids" multiple size="4" required>
                     {% for organization in organizations %}
-                      <option value="{{ organization.id }}" {% if organization.id in assignments.get(item.id, set()) %}selected{% endif %}>{{ organization.name }}</option>
+                      <option value="{{ organization.id }}" {% if organization.id in assignments.get(item.id, []) %}selected{% endif %}>{{ organization.name }}</option>
                     {% endfor %}
                   </select>
                 </div>
