@@ -80,14 +80,32 @@ def test_export_clears_stale_periods_when_employee_has_no_new_periods(tmp_path):
     wb.close()
 
 
-def test_reference_template_has_the_shared_t7_structure():
+def test_reference_template_has_the_shared_t7_structure(tmp_path):
     template = Path(__file__).resolve().parents[2] / "ГРАФИК ОТПУСКОВ ООО  2026.xlsx"
+    output = tmp_path / "reference-filled.xlsx"
     assert template.is_file(), "Reference T-7 workbook must remain in repository root"
     parsed = parse_workbook(template)
     assert parsed
     assert all(row["sheet_name"] == "TDSheet" for row in parsed)
     assert min(row["row_number"] for row in parsed) >= 22
     assert all(row["employee_name"] and row["personnel_number"] for row in parsed)
+
+    first = parsed[0]
+    employee_id = "reference-employee"
+    fill_workbook(
+        template,
+        output,
+        [{**first, "employee_id": employee_id}],
+        {employee_id: [
+            {"start_date": date(2027, 3, 1), "duration_days": 14},
+            {"start_date": date(2027, 9, 1), "duration_days": 7},
+        ]},
+    )
+    wb = load_workbook(output)
+    ws = wb["TDSheet"]
+    assert ws[f"E{first['row_number']}"].value == 21
+    assert ws[f"G{first['row_number']}"].value == "01.03.2027 (14) 01.09.2027 (7)"
+    wb.close()
 
 
 def test_export_rejects_unexpected_t7_column_positions(tmp_path):
