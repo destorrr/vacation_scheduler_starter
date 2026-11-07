@@ -138,7 +138,11 @@ def main():
         page.goto(f"{BASE_URL}/campaigns")
         page.get_by_text(campaign_name).click()
         page.locator('input[type="file"][name="file"]').set_input_files(data["workbook_path"])
-        page.get_by_role("heading", name="Найденные строки сотрудников").wait_for()
+        page.wait_for_load_state("networkidle")
+        assert page.get_by_role("heading", name="Найденные строки сотрудников").count() == 1, (
+            f"Template upload did not render the parsed rows. "
+            f"URL={page.url}; body={page.locator('body').inner_text()[:3000]}"
+        )
         assert page.get_by_text("Не сопоставлено", exact=True).count() == 0
 
         page.get_by_role("link", name="Ввод периодов и экспорт Excel").click()
