@@ -318,7 +318,7 @@ async def upload_template(
             row_number=row["row_number"],
             department_name=row["department_name"],
             position_name=row["position_name"],
-            employee_name=clean_person_name(row["employee_name"]),
+            employee_name=mapped_employee.full_name if mapped_employee else clean_person_name(row["employee_name"]),
             personnel_number=row["personnel_number"],
             mapping_status=mapping_status,
         ))
@@ -437,7 +437,7 @@ def auto_map_template_employees(
             employee_by_name[normalized_name] = employee
             created_count += 1
         row.employee_id = employee.id
-        row.employee_name = clean_person_name(row.employee_name)
+        row.employee_name = employee.full_name
         row.mapping_status = "matched"
         mapped_count += 1
 
