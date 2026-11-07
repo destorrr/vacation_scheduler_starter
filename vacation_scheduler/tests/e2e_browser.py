@@ -131,8 +131,8 @@ def main():
         page.get_by_role("button", name="Войти").click()
         page.get_by_text(data["allowed_name"]).wait_for()
         assert data["denied_name"] not in page.locator("main").inner_text()
-        page.goto(f"{BASE_URL}/admin/users")
-        assert "403" in page.title() or "Forbidden" in page.locator("body").inner_text()
+        forbidden_response = page.goto(f"{BASE_URL}/admin/users")
+        assert forbidden_response is not None and forbidden_response.status == 403
 
         # Upload the real T-7 template; pre-seeded employee names should auto-match.
         page.goto(f"{BASE_URL}/campaigns")
