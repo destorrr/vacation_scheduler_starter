@@ -210,7 +210,7 @@ def test_invalid_template_uploads_preserve_current_version_and_clean_temp_files(
         ),
         (
             "template.csv",
-            b"ФИО;Должность",
+            "ФИО;Должность".encode("utf-8"),
             "text/csv",
             415,
             "Поддерживаются файлы .xlsx и .xlsm",
