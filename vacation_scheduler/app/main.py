@@ -33,6 +33,17 @@ def check_csrf(request: Request, token: str) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF-проверка не пройдена.")
 
 
+def template_upload_error(request: Request, campaign_org_id: UUID, message: str, status_code: int):
+    """Show validation errors in the HTML form while retaining HTTP errors for API clients."""
+    if "text/html" in request.headers.get("accept", "").lower():
+        from urllib.parse import quote
+        return RedirectResponse(
+            "/campaign-organizations/" + str(campaign_org_id) + "?upload_error=" + quote(message),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    raise HTTPException(status_code=status_code, detail=message)
+
+
 def audit(db: Session, actor: User, action: str, entity_id: UUID, details: dict) -> None:
     db.add(AuditLog(
         user_id=actor.id,
@@ -225,10 +236,10 @@ async def upload_template(
         raise HTTPException(status_code=409, detail="Кампания закрыта для изменений.")
     filename = Path(file.filename or "template.xlsx").name
     if Path(filename).suffix.lower() not in {".xlsx", ".xlsm"}:
-        raise HTTPException(status_code=415, detail="Поддерживаются файлы .xlsx и .xlsm.")
+        return template_upload_error(request, campaign_org.id, "Поддерживаются файлы .xlsx и .xlsm.", 415)
     content = await file.read()
     if not content or len(content) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Файл пустой или превышает лимит 20 МБ.")
+        return template_upload_error(request, campaign_org.id, "Файл пустой или превышает лимит 20 МБ.", 413)
     temp_dir = Path(settings.storage_path) / "temp"
     originals_dir = Path(settings.storage_path) / "originals"
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -239,7 +250,7 @@ async def upload_template(
         parsed_rows = parse_workbook(temp_path)
     except ValueError as exc:
         temp_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return template_upload_error(request, campaign_org.id, str(exc), 422)
     digest = sha256(content).hexdigest()
     duplicate = db.scalar(select(TemplateFile.id).where(
         TemplateFile.campaign_organization_id == campaign_org.id,
@@ -247,7 +258,7 @@ async def upload_template(
     ))
     if duplicate:
         temp_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=409, detail="Этот файл уже загружался в данную кампанию.")
+        return template_upload_error(request, campaign_org.id, "Этот файл уже загружался в данную кампанию.", 409)
     max_version = db.scalar(select(func.max(TemplateFile.version_number)).where(
         TemplateFile.campaign_organization_id == campaign_org.id
     )) or 0
