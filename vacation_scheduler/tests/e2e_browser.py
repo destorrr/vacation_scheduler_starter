@@ -137,6 +137,19 @@ def main():
         # Upload the real T-7 template; pre-seeded employee names should auto-match.
         page.goto(f"{BASE_URL}/campaigns")
         page.get_by_text(campaign_name).click()
+
+        # Verify a corrupt workbook produces a visible, recoverable error in the browser.
+        invalid_workbook = Path("/tmp") / f"invalid-template-{suffix}.xlsx"
+        invalid_workbook.write_bytes(b"this is not an Excel workbook")
+        page.locator('input[type="file"][name="file"]').set_input_files(str(invalid_workbook))
+        page.get_by_role("button", name="Загрузить и разобрать").click()
+        page.wait_for_load_state("networkidle")
+        assert "upload_error=" in page.url
+        assert page.locator(".alert.alert-danger").count() == 1
+        assert "Не удалось загрузить шаблон." in page.locator(".alert.alert-danger").inner_text()
+        assert "Файл не удалось прочитать" in page.locator(".alert.alert-danger").inner_text()
+
+        # A failed upload must not block the user from uploading the valid original.
         page.locator('input[type="file"][name="file"]').set_input_files(data["workbook_path"])
         page.get_by_role("button", name="Загрузить и разобрать").click()
         page.wait_for_load_state("networkidle")
