@@ -121,15 +121,13 @@ jobs:
           test -n "$db_backup"
           test -n "$storage_backup"
 
-          # Stop services that may hold database connections before replacing the database.
-          docker compose stop app nginx
-          sudo rm storage/originals/backup-restore-probe.txt
-          docker compose exec -T db sh -c 'dropdb -U "$POSTGRES_USER" "$POSTGRES_DB" && createdb -U "$POSTGRES_USER" "$POSTGRES_DB"'
+          # Restore the dump into a clean database, leaving the running app database untouched.
+          docker compose exec -T db sh -c 'createdb -U "$POSTGRES_USER" vacation_restore_test'
           set -o pipefail
-          gunzip -c "$db_backup" | docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'
+          gunzip -c "$db_backup" | docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" vacation_restore_test'
+          sudo rm storage/originals/backup-restore-probe.txt
           sudo tar -xzf "$storage_backup" -C .
           test "$(sudo cat storage/originals/backup-restore-probe.txt)" = "original-file-before-backup"
-          restored_marker="$(docker compose exec -T db sh -c 'psql -At -U "$POSTGRES_USER" "$POSTGRES_DB" -c "SELECT marker FROM backup_restore_probe"')"
+          restored_marker="$(docker compose exec -T db sh -c 'psql -At -U "$POSTGRES_USER" vacation_restore_test -c "SELECT marker FROM backup_restore_probe"')"
           test "$restored_marker" = "before-backup"
-          docker compose start app nginx
-          echo "Backup/restore smoke test passed: PostgreSQL and storage restored."
+          echo "Backup/restore smoke test passed: PostgreSQL dump and storage archive restored."
