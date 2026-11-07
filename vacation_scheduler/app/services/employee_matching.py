@@ -13,8 +13,8 @@ def clean_person_name(value: str | None) -> str:
     """Remove employment annotations that are not part of a person's full name."""
     if not value:
         return ""
-    value = unicodedata.normalize("NFKC", value).replace("\\u00a0", " ").strip()
-    value = re.sub(r"\\s*\\([^)]*совм[^)]*\\)\\s*$", "", value, flags=re.IGNORECASE)
+    value = unicodedata.normalize("NFKC", value).replace("\u00a0", " ").strip()
+    value = re.sub(r"\s*\([^)]*совм[^)]*\)\s*$", "", value, flags=re.IGNORECASE)
     return " ".join(value.split())
 
 
