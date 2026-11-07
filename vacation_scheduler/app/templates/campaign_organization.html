@@ -39,6 +39,8 @@
           {% if row.mapping_status == "matched" %}
             <span class="badge text-bg-success">Сопоставлено</span>
             {% for emp in employees %}{% if emp.id == row.employee_id %}<span class="small">{{ emp.full_name }}</span>{% endif %}{% endfor %}
+          {% elif row.mapping_status == "ignored" %}
+            <span class="badge text-bg-secondary">Исключено из графика</span>
           {% else %}
             <form method="post" action="/template-rows/{{ row.id }}/map" class="d-flex gap-1 mb-1">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -52,6 +54,12 @@
             <form method="post" action="/template-rows/{{ row.id }}/create-employee">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button class="btn btn-link btn-sm p-0" type="submit">Создать нового сотрудника из строки</button>
+            </form>
+            {% endif %}
+            {% if campaign.status not in ["closed", "archived"] %}
+            <form method="post" action="/template-rows/{{ row.id }}/ignore">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="btn btn-link btn-sm text-secondary p-0" type="submit">Не включать строку в график</button>
             </form>
             {% endif %}
           {% endif %}
