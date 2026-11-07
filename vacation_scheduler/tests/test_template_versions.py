@@ -291,6 +291,26 @@ def test_invalid_template_uploads_preserve_current_version_and_clean_temp_files(
             assert response.status_code == expected_status, filename
             assert expected_detail in response.text, filename
 
+        # Browser form submissions return to the page with a readable alert.
+        page = client.get(f"/campaign-organizations/{campaign_org_id}")
+        browser_response = client.post(
+            f"/campaign-organizations/{campaign_org_id}/template",
+            data={"csrf_token": _csrf(page)},
+            files={"file": (
+                "wrong-headers.xlsx",
+                _workbook_with_headers(["Название", "Дата", "Сумма"]),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )},
+            headers={"accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert browser_response.status_code == 303
+        assert "upload_error=" in browser_response.headers["location"]
+        error_page = client.get(browser_response.headers["location"])
+        assert error_page.status_code == 200
+        assert "alert-danger" in error_page.text
+        assert "Не удалось найти столбец ФИО" in error_page.text
+
     with SessionLocal() as db:
         versions = db.scalars(
             select(TemplateFile)
