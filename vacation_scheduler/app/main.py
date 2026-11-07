@@ -15,6 +15,7 @@ from app.models.entities import (
     AuditLog, Organization, User, UserOrganization, VacationPlan, VacationPeriod, ExportFile,
 )
 from app.security import csrf_is_valid, hash_password, new_csrf_token, verify_password
+from app.services.employee_matching import clean_person_name, normalize_person_name
 
 app = FastAPI(title=settings.app_name, debug=settings.debug)
 app.add_middleware(
@@ -61,7 +62,6 @@ from hashlib import sha256
 from pathlib import Path
 from uuid import UUID, uuid4
 import re
-import unicodedata
 
 from fastapi import File, UploadFile
 from fastapi.responses import RedirectResponse
@@ -71,13 +71,6 @@ from app.models.entities import (
 )
 from app.excel.importer import parse_workbook
 from app.excel.exporter import fill_workbook
-
-
-def normalize_person_name(value: str | None) -> str:
-    if not value:
-        return ""
-    value = unicodedata.normalize("NFKC", value).lower().replace("ё", "е")
-    return " ".join(re.sub(r"[^а-яa-z0-9]+", " ", value).split())
 
 
 
@@ -296,9 +289,21 @@ async def upload_template(
             employee_by_name.setdefault(normalized_name, employee)
 
     matched_count = 0
+    created_employee_count = 0
     review_count = 0
     for row in parsed_rows:
-        mapped_employee = employee_by_name.get(normalize_person_name(row["employee_name"]))
+        normalized_name = normalize_person_name(row["employee_name"])
+        mapped_employee = employee_by_name.get(normalized_name)
+        if normalized_name and mapped_employee is None:
+            mapped_employee = Employee(
+                organization_id=campaign_org.organization_id,
+                full_name=clean_person_name(row["employee_name"]),
+                is_active=True,
+            )
+            db.add(mapped_employee)
+            db.flush()
+            employee_by_name[normalized_name] = mapped_employee
+            created_employee_count += 1
         mapping_status = "matched" if mapped_employee else "unmatched"
         if mapped_employee:
             matched_count += 1
@@ -320,7 +325,9 @@ async def upload_template(
         details={
             "campaign_organization_id": str(campaign_org.id),
             "version": version, "row_count": len(parsed_rows),
-            "matched_count": matched_count, "needs_review_count": review_count,
+            "matched_count": matched_count,
+            "created_employee_count": created_employee_count,
+            "needs_review_count": review_count,
         },
     ))
     db.commit()
@@ -835,17 +842,40 @@ def index(
     )
 
 
-@app.get("/organizations/{organization_id}")
-def organization_access_check(
+@app.get("/organizations/{organization_id}", response_class=HTMLResponse)
+def organization_page(
     organization_id: UUID,
+    request: Request,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     require_org_access(organization_id, user, db)
     organization = db.get(Organization, organization_id)
-    if organization is None:
+    if organization is None or not organization.is_active:
         raise HTTPException(status_code=404, detail="Организация не найдена.")
-    return {"id": str(organization.id), "name": organization.name}
+    campaign_rows = db.execute(
+        select(CampaignOrganization, Campaign)
+        .join(Campaign, Campaign.id == CampaignOrganization.campaign_id)
+        .where(CampaignOrganization.organization_id == organization.id)
+        .order_by(Campaign.year.desc())
+    ).all()
+    employee_count = db.scalar(
+        select(func.count(Employee.id)).where(
+            Employee.organization_id == organization.id,
+            Employee.is_active.is_(True),
+        )
+    ) or 0
+    return templates.TemplateResponse(
+        request=request,
+        name="organization.html",
+        context={
+            "app_name": settings.app_name,
+            "user": user,
+            "organization": organization,
+            "campaign_rows": campaign_rows,
+            "employee_count": employee_count,
+        },
+    )
 
 
 @app.get("/admin/users", response_class=HTMLResponse)
