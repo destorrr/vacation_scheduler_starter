@@ -91,7 +91,7 @@ def test_postgres_migrations_and_authenticated_http_workflow():
         _login(client, admin_username, password)
         admin_page = client.get("/admin/users")
         assert admin_page.status_code == 200
-        assert "CI Central HR" in admin_page.text
+        assert "CI Responsible" in admin_page.text
 
         # Create a real campaign through the same form endpoint used by the UI.
         campaigns_page = client.get("/campaigns")
