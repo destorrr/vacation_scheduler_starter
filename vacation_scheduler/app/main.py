@@ -199,12 +199,16 @@ def campaign_organization_page(
             Employee.organization_id == organization.id, Employee.is_active.is_(True)
         ).order_by(Employee.full_name)
     ).all()
+    unresolved_count = sum(
+        row.mapping_status in {"unmatched", "needs_review"} for row in rows
+    )
     return templates.TemplateResponse(
         request=request, name="campaign_organization.html",
         context={
             "app_name": settings.app_name, "user": user, "campaign": campaign,
             "campaign_org": campaign_org, "organization": organization,
             "current_template": current_template, "rows": rows, "employees": employees,
+            "unresolved_count": unresolved_count,
             "csrf_token": request.session["csrf_token"],
             "upload_error": request.query_params.get("upload_error"),
         },
