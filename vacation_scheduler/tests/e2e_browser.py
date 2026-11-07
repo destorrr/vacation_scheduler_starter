@@ -55,20 +55,13 @@ def seed_data():
             role="central_hr",
             is_active=True,
         )
-        allowed = Organization(name=f"Browser Allowed {suffix}")
         denied = Organization(name=f"Browser Restricted {suffix}")
-        db.add_all([hr, allowed, denied])
+        db.add_all([hr, denied])
         db.flush()
-        for full_name in names.values():
-            db.add(Employee(
-                organization_id=allowed.id,
-                full_name=full_name,
-                is_active=True,
-            ))
         db.commit()
         return {
             "hr_username": hr.username,
-            "allowed_name": allowed.name,
+            "allowed_name": f"Browser Allowed {suffix}",
             "denied_name": denied.name,
             "workbook_path": str(workbook_path),
             "first_employee_name": next(iter(names.values())),
@@ -76,6 +69,15 @@ def seed_data():
                 row for row in parsed_rows if normalize_person_name(row["employee_name"])
             ),
         }
+
+
+def names_from_workbook(workbook_path):
+    names = {}
+    for row in parse_workbook(workbook_path):
+        normalized = normalize_person_name(row["employee_name"])
+        if normalized and normalized not in names:
+            names[normalized] = row["employee_name"]
+    return list(names.values())
 
 
 def main():
@@ -96,8 +98,16 @@ def main():
         page.get_by_role("heading", name="Доступные организации").wait_for()
         page.get_by_role("link", name="Пользователи").click()
         page.get_by_label("Полное название").fill(data["allowed_name"])
-        # Organization already exists from test seeding; the form remains available
-        # and the responsible assignment below exercises the actual admin workflow.
+        page.get_by_role("button", name="Добавить").click()
+        page.get_by_text("Организация создана.").wait_for()
+
+        # Seed the workbook's distinct FIOs after the organization was created in the UI.
+        with SessionLocal() as db:
+            organization = db.scalar(select(Organization).where(Organization.name == data["allowed_name"]))
+            for full_name in names_from_workbook(data["workbook_path"]):
+                db.add(Employee(organization_id=organization.id, full_name=full_name, is_active=True))
+            db.commit()
+
         page.get_by_label("Логин").fill(responsible_username)
         page.get_by_label("ФИО").fill("Browser Test Responsible")
         page.get_by_label("Временный пароль").fill(PASSWORD)
@@ -110,7 +120,7 @@ def main():
         page.get_by_label("Год").fill("2097")
         page.get_by_label("Название").fill(campaign_name)
         page.locator('select[name="organization_ids"]').select_option(label=data["allowed_name"])
-        page.get_by_role("button", name="Создать кампанию").click()
+        page.get_by_role("button", name="Создать").click()
         page.get_by_text(campaign_name).wait_for()
 
         # The responsible user sees only the assigned organization and cannot open HR admin.
