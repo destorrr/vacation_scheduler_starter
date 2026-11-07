@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from app.services.employee_matching import (
     build_employee_name_index,
+    clean_person_name,
     normalize_person_name,
 )
 
@@ -43,6 +44,10 @@ def test_employment_annotations_do_not_change_employee_identity():
     )
     assert normalize_person_name(base) == normalize_person_name(
         "Смирнова Марина Викторовна (внутреннее совместительство)"
+    )
+    assert clean_person_name("Смирнова Марина Викторовна (внутр.совм.)") == base
+    assert clean_person_name("Виноградова Наталья Михайловна (внешн.совм.)") == (
+        "Виноградова Наталья Михайловна"
     )
 
 
