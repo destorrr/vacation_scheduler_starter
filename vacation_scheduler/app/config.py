@@ -27,7 +27,7 @@ class Settings(BaseSettings):
             raise ValueError("SESSION_MAX_AGE must be between 300 and 2592000 seconds.")
         return value
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", validate_default=True)
 
 
 settings = Settings()
