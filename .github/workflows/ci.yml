@@ -95,5 +95,14 @@ jobs:
             sleep 2
           done
           curl --fail http://127.0.0.1:8080/health
+          for attempt in $(seq 1 30); do
+            nginx_id="$(docker compose ps -q nginx)"
+            nginx_health="$(docker inspect --format '{{.State.Health.Status}}' "$nginx_id")"
+            if [ "$nginx_health" = "healthy" ]; then
+              break
+            fi
+            sleep 2
+          done
+          test "$nginx_health" = "healthy"
           docker compose ps
           docker compose exec -T app alembic upgrade head
