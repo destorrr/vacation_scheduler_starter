@@ -31,3 +31,14 @@ def test_name_normalization_ignores_case_punctuation_spaces_and_yo():
         "Смирнова, Марина Викторовна"
     )
     assert normalize_person_name("Семёнов") == normalize_person_name("Семенов")
+
+
+def test_fio_variants_resolve_to_one_employee_despite_different_position_numbers():
+    employee = EmployeeLike("Смирнова Марина Викторовна", "00125")
+    index = build_employee_name_index([employee])
+
+    first_row = normalize_person_name("Смирнова Марина Викторовна")
+    second_row = normalize_person_name("СМИРНОВА, Марина Викторовна")
+
+    assert index[first_row] is employee
+    assert index[second_row] is employee
