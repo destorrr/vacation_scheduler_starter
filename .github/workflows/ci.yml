@@ -43,5 +43,28 @@ jobs:
         run: alembic upgrade head
       - name: Run unit and PostgreSQL integration tests
         run: pytest -q
+      - name: Install Chromium for browser tests
+        run: |
+          pip install -r requirements-e2e.txt
+          playwright install --with-deps chromium
+      - name: Start application for browser tests
+        run: |
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/vacation-scheduler-uvicorn.log 2>&1 &
+          echo $! > /tmp/vacation-scheduler-uvicorn.pid
+          python - <<'PY'
+          import time
+          from urllib.request import urlopen
+          for _ in range(60):
+              try:
+                  with urlopen("http://127.0.0.1:8000/health", timeout=2) as response:
+                      if response.status == 200:
+                          break
+              except Exception:
+                  time.sleep(1)
+          else:
+              raise SystemExit("Application did not start")
+          PY
+      - name: Run real Chromium user workflow
+        run: python tests/e2e_browser.py
       - name: Build application Docker image
         run: docker build -t vacation-scheduler:ci .
