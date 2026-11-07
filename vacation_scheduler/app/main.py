@@ -373,6 +373,84 @@ def map_template_row(
     )
 
 
+@app.post("/campaign-organizations/{campaign_org_id}/auto-map-employees")
+def auto_map_template_employees(
+    campaign_org_id: UUID,
+    request: Request,
+    csrf_token: str = Form(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create missing employee records and map unresolved rows in the current template."""
+    check_csrf(request, csrf_token)
+    campaign_org = db.get(CampaignOrganization, campaign_org_id)
+    if campaign_org is None:
+        raise HTTPException(status_code=404, detail="Кампания организации не найдена.")
+    require_org_access(campaign_org.organization_id, user, db)
+    campaign = db.get(Campaign, campaign_org.campaign_id)
+    if campaign.status in {"closed", "archived"}:
+        raise HTTPException(status_code=409, detail="Кампания закрыта для изменений.")
+    template = db.scalar(
+        select(TemplateFile).where(
+            TemplateFile.campaign_organization_id == campaign_org.id,
+            TemplateFile.is_current.is_(True),
+        ).order_by(TemplateFile.version_number.desc())
+    )
+    if template is None:
+        raise HTTPException(status_code=404, detail="Сначала загрузите шаблон Excel.")
+    employees = db.scalars(select(Employee).where(
+        Employee.organization_id == campaign_org.organization_id,
+        Employee.is_active.is_(True),
+    ).order_by(Employee.created_at, Employee.id)).all()
+    employee_by_name = {}
+    for employee in employees:
+        key = normalize_person_name(employee.full_name)
+        if key:
+            employee_by_name.setdefault(key, employee)
+
+    rows = db.scalars(
+        select(TemplateRow).where(
+            TemplateRow.template_file_id == template.id,
+            TemplateRow.mapping_status.in_(["unmatched", "needs_review"]),
+            TemplateRow.employee_id.is_(None),
+        ).order_by(TemplateRow.sheet_name, TemplateRow.row_number)
+    ).all()
+    created_count = 0
+    mapped_count = 0
+    for row in rows:
+        normalized_name = normalize_person_name(row.employee_name)
+        if not normalized_name:
+            continue
+        employee = employee_by_name.get(normalized_name)
+        if employee is None:
+            employee = Employee(
+                organization_id=campaign_org.organization_id,
+                full_name=clean_person_name(row.employee_name),
+                is_active=True,
+            )
+            db.add(employee)
+            db.flush()
+            employee_by_name[normalized_name] = employee
+            created_count += 1
+        row.employee_id = employee.id
+        row.employee_name = clean_person_name(row.employee_name)
+        row.mapping_status = "matched"
+        mapped_count += 1
+
+    db.add(AuditLog(
+        user_id=user.id,
+        action="template.employees_auto_mapped",
+        entity_type="template_file",
+        entity_id=template.id,
+        details={"created_employee_count": created_count, "mapped_row_count": mapped_count},
+    ))
+    db.commit()
+    return RedirectResponse(
+        f"/campaign-organizations/{campaign_org.id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
 @app.post("/template-rows/{row_id}/ignore")
 def ignore_template_row(
     row_id: UUID,
