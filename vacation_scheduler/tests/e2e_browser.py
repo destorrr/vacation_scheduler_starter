@@ -124,6 +124,7 @@ def main():
         page.get_by_text(campaign_name).wait_for()
 
         # The responsible user sees only the assigned organization and cannot open HR admin.
+        page.goto(f"{BASE_URL}/")
         page.locator('form[action="/logout"] button').click()
         page.get_by_label("Имя пользователя").fill(responsible_username)
         page.get_by_label("Пароль").fill(PASSWORD)
