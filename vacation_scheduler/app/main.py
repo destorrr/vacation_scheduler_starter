@@ -16,7 +16,7 @@ from app.models.entities import (
 )
 from app.security import csrf_is_valid, hash_password, new_csrf_token, verify_password
 
-app = FastAPI(title=settings.app_name)
+app = FastAPI(title=settings.app_name, debug=settings.debug)
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.secret_key,
