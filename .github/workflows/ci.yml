@@ -122,7 +122,7 @@ jobs:
           test -n "$storage_backup"
 
           # Restore the dump into a clean database, leaving the running app database untouched.
-          docker compose exec -T db sh -c 'createdb -U "$POSTGRES_USER" vacation_restore_test'
+          docker compose exec -T db sh -c 'createdb -T template0 -U "$POSTGRES_USER" vacation_restore_test'
           set -o pipefail
           gunzip -c "$db_backup" | docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" vacation_restore_test'
           sudo rm storage/originals/backup-restore-probe.txt
