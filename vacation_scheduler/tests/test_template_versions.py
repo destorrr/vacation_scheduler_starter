@@ -149,3 +149,155 @@ def test_reupload_creates_new_immutable_template_version(tmp_path):
         assert len(current_rows) == 1
         assert current_rows[0].employee_id is not None
         assert current_rows[0].mapping_status == "matched"
+
+
+
+def _workbook_with_headers(headers, employee_rows=()) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Т-7"
+    sheet.append(headers)
+    for row in employee_rows:
+        sheet.append(row)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
+def test_invalid_template_uploads_preserve_current_version_and_clean_temp_files():
+    """Rejected uploads must not replace the current template or leave partial records."""
+    suffix = uuid4().hex[:12]
+    password = "Invalid-Template-Test-2026!"
+    first_bytes = _workbook_bytes(12)
+    invalid_cases = [
+        (
+            "broken.xlsx",
+            b"this is not an Excel workbook",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            422,
+            "Файл не удалось прочитать как книгу Excel",
+        ),
+        (
+            "wrong-headers.xlsx",
+            _workbook_with_headers(["Название", "Дата", "Сумма"], [["Отчёт", "01.01.2026", 10]]),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            422,
+            "Не удалось найти столбец ФИО",
+        ),
+        (
+            "no-employees.xlsx",
+            _workbook_with_headers(["ФИО", "Должность"]),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            422,
+            "Заголовки найдены, но строки сотрудников не обнаружены",
+        ),
+        (
+            "empty.xlsx",
+            b"",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            413,
+            "Файл пустой или превышает лимит 20 МБ",
+        ),
+        (
+            "oversized.xlsx",
+            b"x" * (20 * 1024 * 1024 + 1),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            413,
+            "Файл пустой или превышает лимит 20 МБ",
+        ),
+        (
+            "template.csv",
+            b"ФИО;Должность",
+            "text/csv",
+            415,
+            "Поддерживаются файлы .xlsx и .xlsm",
+        ),
+    ]
+
+    with SessionLocal() as db:
+        user = User(
+            username=f"ci-invalid-{suffix}",
+            full_name="CI Invalid Template User",
+            password_hash=hash_password(password),
+            role="central_hr",
+            is_active=True,
+        )
+        organization = Organization(name=f"CI Invalid Template Org {suffix}")
+        db.add_all([user, organization])
+        db.flush()
+        campaign = Campaign(
+            year=2000 + (int(suffix[:6], 16) % 201),
+            name=f"CI Invalid Template Campaign {suffix}",
+            status="draft",
+            created_by=user.id,
+        )
+        db.add(campaign)
+        db.flush()
+        campaign_org = CampaignOrganization(
+            campaign_id=campaign.id,
+            organization_id=organization.id,
+            status="pending",
+        )
+        employee = Employee(
+            organization_id=organization.id,
+            full_name="Иванов Иван Иванович",
+            is_active=True,
+        )
+        db.add_all([campaign_org, employee])
+        db.commit()
+        campaign_org_id = campaign_org.id
+
+    with TestClient(app) as client:
+        login_page = client.get("/login")
+        login = client.post(
+            "/login",
+            data={
+                "username": f"ci-invalid-{suffix}",
+                "password": password,
+                "csrf_token": _csrf(login_page),
+            },
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
+
+        initial_page = client.get(f"/campaign-organizations/{campaign_org_id}")
+        initial_upload = client.post(
+            f"/campaign-organizations/{campaign_org_id}/template",
+            data={"csrf_token": _csrf(initial_page)},
+            files={"file": (
+                "valid.xlsx",
+                first_bytes,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )},
+            follow_redirects=False,
+        )
+        assert initial_upload.status_code == 303
+
+        for filename, content, content_type, expected_status, expected_detail in invalid_cases:
+            page = client.get(f"/campaign-organizations/{campaign_org_id}")
+            response = client.post(
+                f"/campaign-organizations/{campaign_org_id}/template",
+                data={"csrf_token": _csrf(page)},
+                files={"file": (filename, content, content_type)},
+                follow_redirects=False,
+            )
+            assert response.status_code == expected_status, filename
+            assert expected_detail in response.text, filename
+
+    with SessionLocal() as db:
+        versions = db.scalars(
+            select(TemplateFile)
+            .where(TemplateFile.campaign_organization_id == campaign_org_id)
+            .order_by(TemplateFile.version_number)
+        ).all()
+        assert len(versions) == 1
+        assert versions[0].version_number == 1
+        assert versions[0].is_current is True
+        assert sha256(open(versions[0].storage_path, "rb").read()).digest() == sha256(first_bytes).digest()
+        rows = db.scalars(
+            select(TemplateRow).where(TemplateRow.template_file_id == versions[0].id)
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].employee_id is not None
+        assert list((Path(settings.storage_path) / "temp").glob("*")) == []
