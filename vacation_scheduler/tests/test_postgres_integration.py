@@ -437,8 +437,12 @@ def test_existing_template_rows_can_be_auto_mapped_without_reupload():
         organization = Organization(name=f"CI Existing Template Org {suffix}")
         db.add_all([user, organization])
         db.flush()
+        used_years = set(db.scalars(select(Campaign.year)).all())
+        candidate_year = 2000 + int(suffix[:4], 16) % 200
+        while candidate_year in used_years:
+            candidate_year = 2000 + (candidate_year - 1999) % 200
         campaign = Campaign(
-            year=2000 + int(suffix[:4], 16) % 200,
+            year=candidate_year,
             name=f"CI Existing Template Campaign {suffix}",
             status="draft",
             created_by=user.id,
@@ -477,6 +481,7 @@ def test_existing_template_rows_can_be_auto_mapped_without_reupload():
             ))
         campaign_org_id = campaign_org.id
         organization_id = organization.id
+        template_id = template.id
         db.commit()
 
     with TestClient(app) as client:
@@ -499,7 +504,7 @@ def test_existing_template_rows_can_be_auto_mapped_without_reupload():
         assert employees[0].full_name == full_name
         rows = db.scalars(
             select(TemplateRow).where(
-                TemplateRow.template_file_id == template.id
+                TemplateRow.template_file_id == template_id
             ).order_by(TemplateRow.row_number)
         ).all()
         assert len(rows) == 2
