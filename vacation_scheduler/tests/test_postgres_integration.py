@@ -115,6 +115,12 @@ def test_postgres_migrations_and_authenticated_http_workflow():
         assert home.status_code == 200
         assert f"CI Allowed {suffix}" in home.text
         assert f"CI Denied {suffix}" not in home.text
+        organization_link = f"/organizations/{allowed_org_id}"
+        assert organization_link in home.text
+        organization_page = client.get(organization_link)
+        assert organization_page.status_code == 200
+        assert f"CI Allowed {suffix}" in organization_page.text
+        assert "Организация" in organization_page.text
         assert client.get("/admin/users").status_code == 403
         campaigns = client.get("/campaigns")
         assert campaigns.status_code == 200
@@ -172,20 +178,7 @@ def test_reference_t7_http_upload_vacation_entry_and_excel_download(tmp_path):
         db.add_all([admin, organization])
         db.flush()
 
-        # Pre-create one employee per distinct normalized FIO in this legal entity.
-        employee_by_name = {}
-        for row in parsed:
-            normalized = normalize_person_name(row["employee_name"])
-            if normalized and normalized not in employee_by_name:
-                employee = Employee(
-                    organization_id=organization.id,
-                    full_name=row["employee_name"],
-                    is_active=True,
-                )
-                db.add(employee)
-                employee_by_name[normalized] = employee
-        db.flush()
-        target_employee_id = employee_by_name[normalize_person_name(target_name)].id
+        # Employees must be created by the actual template upload, not pre-seeded.
         organization_id = organization.id
         db.commit()
 
@@ -237,6 +230,16 @@ def test_reference_t7_http_upload_vacation_entry_and_excel_download(tmp_path):
             )
             assert template is not None
             template_id = template.id
+            imported_employees = db.scalars(
+                select(Employee).where(Employee.organization_id == organization_id)
+            ).all()
+            expected_names = {normalize_person_name(row["employee_name"]) for row in parsed}
+            assert {normalize_person_name(item.full_name) for item in imported_employees} == expected_names
+            target_employee = next(
+                item for item in imported_employees
+                if normalize_person_name(item.full_name) == normalize_person_name(target_name)
+            )
+            target_employee_id = target_employee.id
             mapped_rows = db.scalars(
                 select(TemplateRow).where(
                     TemplateRow.template_file_id == template_id,
