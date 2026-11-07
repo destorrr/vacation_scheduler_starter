@@ -1,4 +1,5 @@
 from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
 
 from app.excel.importer import detect_header, parse_workbook
 
@@ -48,3 +49,53 @@ def test_detect_header_returns_none_for_unrelated_sheet(tmp_path):
     ws.append(["Название", "Дата", "Сумма"])
     wb.save(path)
     assert detect_header(ws) is None
+
+
+def test_import_keeps_duplicate_fio_rows_and_position_specific_personnel_numbers(tmp_path):
+    path = tmp_path / "duplicate-fio.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Т-7"
+    ws.append(["№", "Структурное подразделение", "Должность", "ФИО", "Табельный номер"])
+    ws.append([1, "Бухгалтерия", "Бухгалтер", "Смирнова Марина Викторовна", "00125"])
+    ws.append([2, None, "Главный бухгалтер", "СМИРНОВА, Марина Викторовна", "00987"])
+    ws.merge_cells("B2:B3")
+    ws["B2"].font = Font(bold=True)
+    ws["B2"].fill = PatternFill("solid", fgColor="FFFF00")
+    ws.append([None, None, None, None, None])
+    ws.append([3, "Кадровая служба", "Специалист", "Иванов Иван Иванович", "00126"])
+    wb.save(path)
+
+    rows = parse_workbook(path)
+
+    assert len(rows) == 3
+    assert [row["row_number"] for row in rows] == [2, 3, 5]
+    assert rows[0]["employee_name"] == "Смирнова Марина Викторовна"
+    assert rows[1]["employee_name"] == "СМИРНОВА, Марина Викторовна"
+    assert rows[0]["department_name"] == rows[1]["department_name"] == "Бухгалтерия"
+    assert [row["position_name"] for row in rows[:2]] == [
+        "Бухгалтер", "Главный бухгалтер"
+    ]
+    assert [row["personnel_number"] for row in rows[:2]] == ["00125", "00987"]
+    assert rows[2]["department_name"] == "Кадровая служба"
+
+
+def test_import_ignores_fully_empty_rows_and_preserves_sheet_names(tmp_path):
+    path = tmp_path / "empty-rows.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Основной лист"
+    ws.append(["ФИО", "Подразделение"])
+    ws.append(["Петров Пётр Петрович", "Отдел продаж"])
+    ws.append([None, None])
+    ws.append([None, None])
+    ws.append(["Сидоров Сидор Сидорович", "Отдел закупок"])
+    wb.save(path)
+
+    rows = parse_workbook(path)
+
+    assert [(row["row_number"], row["employee_name"]) for row in rows] == [
+        (2, "Петров Пётр Петрович"),
+        (5, "Сидоров Сидор Сидорович"),
+    ]
+    assert all(row["sheet_name"] == "Основной лист" for row in rows)
