@@ -99,3 +99,45 @@ def test_import_ignores_fully_empty_rows_and_preserves_sheet_names(tmp_path):
         (5, "Сидоров Сидор Сидорович"),
     ]
     assert all(row["sheet_name"] == "Основной лист" for row in rows)
+
+
+def test_import_skips_hidden_and_very_hidden_worksheets(tmp_path):
+    path = tmp_path / "hidden-sheets.xlsx"
+    wb = Workbook()
+    visible = wb.active
+    visible.title = "Т-7"
+    visible.append(["ФИО", "Должность"])
+    visible.append(["Иванов Иван Иванович", "Специалист"])
+    hidden = wb.create_sheet("Архив")
+    hidden.append(["ФИО", "Должность"])
+    hidden.append(["Петров Пётр Петрович", "Архивная должность"])
+    hidden.sheet_state = "hidden"
+    very_hidden = wb.create_sheet("Служебный")
+    very_hidden.append(["ФИО", "Должность"])
+    very_hidden.append(["Сидоров Сидор Сидорович", "Служебная должность"])
+    very_hidden.sheet_state = "veryHidden"
+    wb.save(path)
+    wb.close()
+
+    rows = parse_workbook(path)
+
+    assert [(row["sheet_name"], row["employee_name"]) for row in rows] == [
+        ("Т-7", "Иванов Иван Иванович"),
+    ]
+
+
+def test_formula_cells_without_cached_values_are_not_imported_as_employee_names(tmp_path):
+    path = tmp_path / "formula-names.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Т-7"
+    ws.append(["ФИО", "Должность"])
+    ws.append(['="Иванов Иван Иванович"', "Специалист"])
+    ws.append(["Петров Пётр Петрович", "Бухгалтер"])
+    wb.save(path)
+    wb.close()
+
+    rows = parse_workbook(path)
+
+    # openpyxl does not calculate formulas; with data_only=True an uncached formula is blank.
+    assert [row["employee_name"] for row in rows] == ["Петров Пётр Петрович"]
