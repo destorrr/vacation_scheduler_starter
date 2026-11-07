@@ -24,7 +24,7 @@
 
 ```bash
 git clone https://github.com/destorrr/vacation_scheduler_starter.git
-cd vacation_scheduler/vacation_scheduler
+cd vacation_scheduler
 git switch feature/auth-and-permissions
 ```
 
