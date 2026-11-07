@@ -97,12 +97,12 @@ def test_postgres_migrations_and_authenticated_http_workflow():
         campaigns_page = client.get("/campaigns")
         campaign_response = client.post(
             "/campaigns",
-            data=[
-                ("year", "2028"),
-                ("name", "CI integration campaign"),
-                ("organization_ids", str(allowed_org_id)),
-                ("csrf_token", _csrf_token(campaigns_page)),
-            ],
+            data={
+                "year": "2028",
+                "name": "CI integration campaign",
+                "organization_ids": [str(allowed_org_id)],
+                "csrf_token": _csrf_token(campaigns_page),
+            },
             follow_redirects=False,
         )
         assert campaign_response.status_code == 303
