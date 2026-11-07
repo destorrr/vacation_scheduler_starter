@@ -18,6 +18,7 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.excel.importer import parse_workbook
 from app.main import normalize_person_name
+from app.services.employee_matching import clean_person_name
 from app.models.entities import Employee, Organization, User
 from app.security import hash_password
 
@@ -64,7 +65,7 @@ def seed_data():
             "allowed_name": f"Browser Allowed {suffix}",
             "denied_name": denied.name,
             "workbook_path": str(workbook_path),
-            "first_employee_name": next(iter(names.values())),
+            "first_employee_name": clean_person_name(next(iter(names.values()))),
             "first_row": next(
                 row for row in parsed_rows if normalize_person_name(row["employee_name"])
             ),
@@ -101,13 +102,6 @@ def main():
         page.get_by_role("button", name="Добавить").click()
         page.get_by_text("Организация создана.").wait_for()
 
-        # Seed the workbook's distinct FIOs after the organization was created in the UI.
-        with SessionLocal() as db:
-            organization = db.scalar(select(Organization).where(Organization.name == data["allowed_name"]))
-            for full_name in names_from_workbook(data["workbook_path"]):
-                db.add(Employee(organization_id=organization.id, full_name=full_name, is_active=True))
-            db.commit()
-
         page.get_by_label("Логин").fill(responsible_username)
         page.locator("#new-full-name").fill("Browser Test Responsible")
         page.get_by_label("Временный пароль").fill(PASSWORD)
@@ -134,7 +128,7 @@ def main():
         forbidden_response = page.goto(f"{BASE_URL}/admin/users")
         assert forbidden_response is not None and forbidden_response.status == 403
 
-        # Upload the real T-7 template; pre-seeded employee names should auto-match.
+        # Upload the real T-7 template; employee records should be created automatically.
         page.goto(f"{BASE_URL}/campaigns")
         page.get_by_text(campaign_name).click()
 
@@ -158,6 +152,10 @@ def main():
             f"URL={page.url}; body={page.locator('body').inner_text()[:3000]}"
         )
         assert page.get_by_text("Не сопоставлено", exact=True).count() == 0
+        with SessionLocal() as db:
+            organization = db.scalar(select(Organization).where(Organization.name == data["allowed_name"]))
+            imported_count = db.query(Employee).filter(Employee.organization_id == organization.id).count()
+            assert imported_count == len(names_from_workbook(data["workbook_path"]))
 
         page.get_by_role("link", name="Ввод периодов и экспорт Excel").click()
         employee_card = page.locator("section.card").filter(
