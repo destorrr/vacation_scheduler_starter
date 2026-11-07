@@ -147,7 +147,10 @@ def main():
         assert page.get_by_text("Не сопоставлено", exact=True).count() == 0
 
         page.get_by_role("link", name="Ввод периодов и экспорт Excel").click()
-        first_form = page.locator('form[action*="/periods"]').first
+        employee_card = page.locator("section.card").filter(
+            has=page.get_by_role("heading", name=data["first_employee_name"], exact=True)
+        )
+        first_form = employee_card.locator('form[action*="/periods"]')
         first_form.locator('input[name="start_date"]').fill("2027-03-01")
         first_form.locator('input[name="end_date"]').fill("2027-03-14")
         first_form.get_by_role("button", name="Добавить период").click()
