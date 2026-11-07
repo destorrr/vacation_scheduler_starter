@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
@@ -146,8 +144,8 @@ def test_formula_cells_without_cached_values_are_not_imported_as_employee_names(
 
 
 
-def test_import_preserves_original_fio_with_employment_annotation():
-    path = Path(__file__).parent / "annotated-fio-test.xlsx"
+def test_import_preserves_original_fio_with_employment_annotation(tmp_path):
+    path = tmp_path / "annotated-fio-test.xlsx"
     wb = Workbook()
     ws = wb.active
     ws.title = "Т-7"
