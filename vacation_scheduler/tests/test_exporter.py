@@ -1,67 +1,110 @@
 from datetime import date
+from pathlib import Path
 
 import pytest
 from openpyxl import Workbook, load_workbook
 
 from app.excel.exporter import fill_workbook
+from app.excel.importer import parse_workbook
 
 
-def make_template(path, period_slots=2):
+def make_template(path):
     wb = Workbook()
     ws = wb.active
-    ws.title = "График"
-    headers = ["Подразделение", "Должность", "ФИО", "Табельный номер"]
-    for _ in range(period_slots):
-        headers.extend(["Количество календарных дней", "Запланированная дата"])
-    ws.append(headers)
-    ws.append(["Отдел", "Специалист", "Иванов Иван Иванович", "001"])
-    ws.merge_cells(start_row=3, start_column=1, end_row=4, end_column=1)
-    ws["A3"] = "Другой отдел"
-    ws.append(["Отдел", "Эксперт", "Петров Пётр Петрович", "002"])
+    ws.title = "TDSheet"
+    ws["A18"] = "Структурное подразделение"
+    ws["B18"] = "Должность (специальность, профессия) по штатному расписанию"
+    ws["C18"] = "Фамилия, имя, отчество"
+    ws["D18"] = "Табельный номер"
+    ws.merge_cells("E18:F18")
+    ws["E18"] = "ОТПУСК"
+    ws["E19"] = "Количество календарных дней"
+    ws["G20"] = "запланированная"
+    ws.merge_cells("E22:F22")
+    ws["A22"] = "Отдел"
+    ws["B22"] = "Специалист"
+    ws["C22"] = "Иванов Иван Иванович"
+    ws["D22"] = "001"
+    ws["E22"] = 36
+    ws["G22"] = "01.01.2026 (36)"
+    ws.merge_cells("E23:F23")
+    ws["A23"] = "Отдел"
+    ws["B23"] = "Эксперт"
+    ws["C23"] = "Иванов Иван Иванович"
+    ws["D23"] = "001"
+    ws["E23"] = 36
+    ws["G23"] = "01.01.2026 (36)"
     wb.save(path)
 
 
-def test_export_fills_periods_and_preserves_original(tmp_path):
+def test_export_writes_all_periods_to_shared_t7_cells_and_preserves_original(tmp_path):
     source = tmp_path / "original.xlsx"
     output = tmp_path / "filled.xlsx"
     make_template(source)
-    rows = [{
-        "sheet_name": "График", "row_number": 2, "employee_id": "employee-1",
-        "employee_name": "Иванов Иван Иванович",
-    }]
+    rows = [
+        {"sheet_name": "TDSheet", "row_number": 22, "employee_id": "employee-1", "employee_name": "Иванов Иван Иванович"},
+        {"sheet_name": "TDSheet", "row_number": 23, "employee_id": "employee-1", "employee_name": "Иванов Иван Иванович"},
+    ]
     periods = {"employee-1": [
-        {"start_date": date(2027, 3, 1), "duration_days": 14},
-        {"start_date": date(2027, 9, 1), "duration_days": 7},
+        {"start_date": date(2027, 3, 1), "duration_days": 14, "sort_order": 1},
+        {"start_date": date(2027, 9, 1), "duration_days": 7, "sort_order": 2},
     ]}
 
     result = fill_workbook(source, output, rows, periods)
 
-    assert result == {"filled_rows": 1, "filled_periods": 2}
+    assert result == {"filled_rows": 2, "filled_periods": 4}
     wb = load_workbook(output)
-    ws = wb["График"]
-    assert ws["E2"].value == 14
-    assert ws["F2"].value.date() == date(2027, 3, 1)
-    assert ws["G2"].value == 7
-    assert ws["H2"].value.date() == date(2027, 9, 1)
-    assert "A3:A4" in {str(item) for item in ws.merged_cells.ranges}
+    ws = wb["TDSheet"]
+    for row in (22, 23):
+        assert ws[f"E{row}"].value == 21
+        assert ws[f"G{row}"].value == "01.03.2027 (14) 01.09.2027 (7)"
+    assert "E22:F22" in {str(item) for item in ws.merged_cells.ranges}
     original = load_workbook(source)
-    assert original["График"]["E2"].value is None
+    assert original["TDSheet"]["E22"].value == 36
+    assert original["TDSheet"]["G22"].value == "01.01.2026 (36)"
     wb.close()
     original.close()
 
 
-def test_export_fails_instead_of_dropping_extra_periods(tmp_path):
+def test_export_clears_stale_periods_when_employee_has_no_new_periods(tmp_path):
     source = tmp_path / "original.xlsx"
     output = tmp_path / "filled.xlsx"
-    make_template(source, period_slots=1)
-    rows = [{
-        "sheet_name": "График", "row_number": 2, "employee_id": "employee-1",
-        "employee_name": "Иванов Иван Иванович",
-    }]
-    periods = {"employee-1": [
-        {"start_date": date(2027, 3, 1), "duration_days": 14},
-        {"start_date": date(2027, 9, 1), "duration_days": 7},
-    ]}
-    with pytest.raises(ValueError, match="не предусмотрено пар столбцов"):
-        fill_workbook(source, output, rows, periods)
+    make_template(source)
+    rows = [{"sheet_name": "TDSheet", "row_number": 22, "employee_id": "employee-1"}]
+
+    fill_workbook(source, output, rows, {})
+
+    wb = load_workbook(output)
+    assert wb["TDSheet"]["E22"].value is None
+    assert wb["TDSheet"]["G22"].value is None
+    wb.close()
+
+
+def test_reference_template_has_the_shared_t7_structure():
+    template = Path(__file__).resolve().parents[2] / "ГРАФИК ОТПУСКОВ ООО  2026.xlsx"
+    assert template.is_file(), "Reference T-7 workbook must remain in repository root"
+    parsed = parse_workbook(template)
+    assert parsed
+    assert all(row["sheet_name"] == "TDSheet" for row in parsed)
+    assert min(row["row_number"] for row in parsed) >= 22
+    assert all(row["employee_name"] and row["personnel_number"] for row in parsed)
+
+
+def test_export_rejects_unexpected_t7_column_positions(tmp_path):
+    source = tmp_path / "wrong.xlsx"
+    output = tmp_path / "filled.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws["A18"] = "Структурное подразделение"
+    ws["B18"] = "Должность (специальность, профессия) по штатному расписанию"
+    ws["C18"] = "Фамилия, имя, отчество"
+    ws["D18"] = "Табельный номер"
+    ws["A22"] = "Отдел"
+    ws["B22"] = "Специалист"
+    ws["C22"] = "Иванов Иван Иванович"
+    ws["D22"] = "001"
+    ws["F22"] = "bad"
+    wb.save(source)
+    with pytest.raises(ValueError, match="общая структура Т-7"):
+        fill_workbook(source, output, [{"sheet_name": "Sheet", "row_number": 22, "employee_id": "e"}], {"e": []})
     assert not output.exists()
