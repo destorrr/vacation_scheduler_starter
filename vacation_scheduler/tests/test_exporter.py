@@ -236,3 +236,42 @@ def test_xlsm_export_preserves_vba_project_payload(tmp_path):
         assert wb["TDSheet"]["G22"].value == "01.03.2027 (14)"
     finally:
         wb.close()
+
+
+
+def test_export_preserves_hidden_rows_columns_sheet_protection_merges_and_formulas(tmp_path):
+    source = tmp_path / "features.xlsx"
+    output = tmp_path / "features-filled.xlsx"
+    make_template(source)
+
+    source_wb = load_workbook(source, data_only=False)
+    source_ws = source_wb["TDSheet"]
+    source_ws.row_dimensions[22].hidden = True
+    source_ws.column_dimensions["H"].hidden = True
+    source_ws["H22"] = "=SUM(1,2)"
+    source_ws.protection.sheet = True
+    source_ws.protection.selectLockedCells = False
+    source_wb.save(source)
+    source_wb.close()
+
+    result = fill_workbook(
+        source,
+        output,
+        [{"sheet_name": "TDSheet", "row_number": 22, "employee_id": "employee-1"}],
+        {"employee-1": [{"start_date": date(2027, 3, 1), "duration_days": 14}]},
+    )
+
+    assert result == {"filled_rows": 1, "filled_periods": 1}
+    exported = load_workbook(output, data_only=False)
+    ws = exported["TDSheet"]
+    try:
+        assert ws.row_dimensions[22].hidden is True
+        assert ws.column_dimensions["H"].hidden is True
+        assert ws.protection.sheet is True
+        assert ws.protection.selectLockedCells is False
+        assert "E22:F22" in {str(item) for item in ws.merged_cells.ranges}
+        assert ws["H22"].value == "=SUM(1,2)"
+        assert ws["E22"].value == 14
+        assert ws["G22"].value == "01.03.2027 (14)"
+    finally:
+        exported.close()
