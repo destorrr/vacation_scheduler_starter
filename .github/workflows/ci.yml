@@ -122,15 +122,28 @@ jobs:
           test -n "$storage_backup"
 
           # Restore the dump into a clean database, leaving the running app database untouched.
+          echo "RESTORE CHECK 1/5: create isolated database"
           docker compose exec -T db sh -c 'createdb -T template0 -U "$POSTGRES_USER" vacation_restore_test'
+          echo "RESTORE CHECK 2/5: apply PostgreSQL dump"
           set -o pipefail
           if ! gunzip -c "$db_backup" | docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 --echo-errors -U "$POSTGRES_USER" vacation_restore_test' > /tmp/restore-test.log 2>&1; then
             tail -n 80 /tmp/restore-test.log
             exit 1
           fi
+          echo "RESTORE CHECK 3/5: restore storage archive"
           sudo rm storage/originals/backup-restore-probe.txt
           sudo tar -xzf "$storage_backup" -C .
-          test "$(sudo cat storage/originals/backup-restore-probe.txt)" = "original-file-before-backup"
-          restored_marker="$(docker compose exec -T db sh -c 'psql -At -U "$POSTGRES_USER" vacation_restore_test -c "SELECT marker FROM backup_restore_probe"')"
-          test "$restored_marker" = "before-backup"
-          echo "Backup/restore smoke test passed: PostgreSQL dump and storage archive restored."
+          restored_file="$(sudo cat storage/originals/backup-restore-probe.txt 2>&1)" || { echo "Storage file missing after restore: $restored_file"; exit 1; }
+          printf 'Restored storage content: <%s>\\n' "$restored_file"
+          if [ "$restored_file" != "original-file-before-backup" ]; then
+            echo "Storage content does not match the pre-backup marker."
+            exit 1
+          fi
+          echo "RESTORE CHECK 4/5: verify database marker"
+          restored_marker="$(docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" vacation_restore_test -c "SELECT marker FROM backup_restore_probe"')"
+          printf 'Restored database marker: <%s>\\n' "$restored_marker"
+          if [ "$restored_marker" != "before-backup" ]; then
+            echo "Database marker does not match the pre-backup value."
+            exit 1
+          fi
+          echo "RESTORE CHECK 5/5: all backup/restore checks passed."
