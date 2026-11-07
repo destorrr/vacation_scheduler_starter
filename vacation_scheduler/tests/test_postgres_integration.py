@@ -184,6 +184,7 @@ def test_reference_t7_http_upload_vacation_entry_and_excel_download(tmp_path):
                 )
                 db.add(employee)
                 employee_by_name[normalized] = employee
+        db.flush()
         target_employee_id = employee_by_name[normalize_person_name(target_name)].id
         organization_id = organization.id
         db.commit()
