@@ -320,3 +320,91 @@ def test_reference_t7_http_upload_vacation_entry_and_excel_download(tmp_path):
         saved_template = db.get(TemplateFile, template_id)
         assert Path(saved_template.storage_path).read_bytes() == template_bytes
     assert sha256(template_path.read_bytes()).hexdigest() == original_digest
+
+
+
+def test_responsible_can_ignore_non_employee_template_row():
+    """The UI must offer and persist the explicit ignore action for non-employee rows."""
+    from app.models.entities import Campaign, CampaignOrganization, TemplateFile, TemplateRow
+
+    suffix = uuid4().hex[:10]
+    password = "Integration-Test-Password-2026!"
+    with SessionLocal() as db:
+        responsible = User(
+            username=f"ci-ignore-{suffix}",
+            full_name="CI Ignore Responsible",
+            password_hash=hash_password(password),
+            role="responsible",
+            is_active=True,
+        )
+        organization = Organization(name=f"CI Ignore Organization {suffix}")
+        db.add_all([responsible, organization])
+        db.flush()
+        db.add(UserOrganization(user_id=responsible.id, organization_id=organization.id))
+        campaign = Campaign(
+            year=2075,
+            name="CI ignore workflow",
+            status="draft",
+            created_by=responsible.id,
+        )
+        db.add(campaign)
+        db.flush()
+        campaign_org = CampaignOrganization(
+            campaign_id=campaign.id,
+            organization_id=organization.id,
+            status="imported",
+        )
+        db.add(campaign_org)
+        db.flush()
+        template = TemplateFile(
+            campaign_organization_id=campaign_org.id,
+            organization_id=organization.id,
+            original_filename="reference.xlsx",
+            storage_path="/tmp/reference.xlsx",
+            sha256=uuid4().hex + uuid4().hex,
+            version_number=1,
+            is_current=True,
+            uploaded_by=responsible.id,
+        )
+        db.add(template)
+        db.flush()
+        row = TemplateRow(
+            template_file_id=template.id,
+            sheet_name="TDSheet",
+            row_number=12,
+            department_name="Администрация",
+            position_name="Заголовок",
+            employee_name=None,
+            personnel_number=None,
+            mapping_status="unmatched",
+        )
+        db.add(row)
+        db.flush()
+        campaign_org_id = campaign_org.id
+        row_id = row.id
+        db.commit()
+
+    with TestClient(app) as client:
+        _login(client, f"ci-ignore-{suffix}", password)
+        page = client.get(f"/campaign-organizations/{campaign_org_id}")
+        assert page.status_code == 200
+        assert "Не включать строку в график" in page.text
+        response = client.post(
+            f"/template-rows/{row_id}/ignore",
+            data={"csrf_token": _csrf_token(page)},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == f"/campaign-organizations/{campaign_org_id}"
+        refreshed = client.get(f"/campaign-organizations/{campaign_org_id}")
+        assert refreshed.status_code == 200
+        assert "Исключено из графика" in refreshed.text
+
+        vacations = client.get(f"/campaign-organizations/{campaign_org_id}/vacations")
+        assert vacations.status_code == 200
+        assert "несопоставленных строк: 0" not in vacations.text
+
+    with SessionLocal() as db:
+        saved_row = db.get(TemplateRow, row_id)
+        assert saved_row.mapping_status == "ignored"
+        assert saved_row.employee_id is None
