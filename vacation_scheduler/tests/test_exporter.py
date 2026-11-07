@@ -126,3 +126,84 @@ def test_export_rejects_unexpected_t7_column_positions(tmp_path):
     with pytest.raises(ValueError, match="общая структура Т-7"):
         fill_workbook(source, output, [{"sheet_name": "Sheet", "row_number": 22, "employee_id": "e"}], {"e": []})
     assert not output.exists()
+
+
+
+def test_end_to_end_reference_template_groups_by_name_and_exports_all_positions(tmp_path):
+    """Exercise the real T-7: parse rows, group by FIO (not personnel number),
+    enter one set of periods per employee, and export to every linked position.
+    """
+    from collections import defaultdict
+
+    from app.services.employee_matching import normalize_person_name
+
+    template = Path(__file__).resolve().parents[2] / "ГРАФИК ОТПУСКОВ ООО  2026.xlsx"
+    output = tmp_path / "reference-end-to-end.xlsx"
+    parsed_rows = parse_workbook(template)
+
+    grouped_rows = defaultdict(list)
+    for row in parsed_rows:
+        grouped_rows[normalize_person_name(row["employee_name"])].append(row)
+
+    duplicate_groups = [
+        (name, rows)
+        for name, rows in grouped_rows.items()
+        if name and len(rows) > 1
+    ]
+    assert duplicate_groups, "Reference template should contain employees with multiple positions"
+
+    # Pick a real employee whose job rows carry different personnel numbers.
+    different_number_groups = [
+        (name, rows)
+        for name, rows in duplicate_groups
+        if len({row["personnel_number"] for row in rows}) > 1
+    ]
+    assert different_number_groups, (
+        "Reference template should demonstrate that one employee can have "
+        "different personnel numbers for different positions"
+    )
+
+    employee_periods = {}
+    export_rows = []
+    for normalized_name, employee_rows in grouped_rows.items():
+        employee_id = f"employee:{normalized_name}"
+        employee_periods[employee_id] = [
+            {"start_date": date(2027, 3, 1), "duration_days": 14, "sort_order": 1},
+            {"start_date": date(2027, 9, 1), "duration_days": 7, "sort_order": 2},
+        ]
+        for row in employee_rows:
+            export_rows.append({**row, "employee_id": employee_id})
+
+    result = fill_workbook(template, output, export_rows, employee_periods)
+    assert result == {
+        "filled_rows": len(parsed_rows),
+        "filled_periods": len(parsed_rows) * 2,
+    }
+
+    wb = load_workbook(output, data_only=False)
+    source_wb = load_workbook(template, data_only=False)
+    try:
+        output_ws = wb["TDSheet"]
+        source_ws = source_wb["TDSheet"]
+        for _, employee_rows in duplicate_groups:
+            first_row = employee_rows[0]
+            expected_employee_id = f"employee:{normalize_person_name(first_row['employee_name'])}"
+            expected_rows = [
+                row for row in employee_rows
+                if f"employee:{normalize_person_name(row['employee_name'])}" == expected_employee_id
+            ]
+            for row in expected_rows:
+                row_number = row["row_number"]
+                assert output_ws[f"E{row_number}"].value == 21
+                assert output_ws[f"G{row_number}"].value == (
+                    "01.03.2027 (14) 01.09.2027 (7)"
+                )
+                # Position-specific personnel numbers must be preserved verbatim.
+                assert output_ws[f"D{row_number}"].value == source_ws[f"D{row_number}"].value
+
+        assert {str(r) for r in output_ws.merged_cells.ranges} == {
+            str(r) for r in source_ws.merged_cells.ranges
+        }
+    finally:
+        wb.close()
+        source_wb.close()
