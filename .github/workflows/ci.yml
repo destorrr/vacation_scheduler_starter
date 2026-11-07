@@ -110,7 +110,7 @@ jobs:
           # Verify that the production backup script captures both PostgreSQL and uploaded files.
           sudo mkdir -p storage/originals
           mkdir -p backups
-          printf '%s\\n' 'original-file-before-backup' | sudo tee storage/originals/backup-restore-probe.txt >/dev/null
+          printf '%s\n' 'original-file-before-backup' | sudo tee storage/originals/backup-restore-probe.txt >/dev/null
           docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
           CREATE TABLE backup_restore_probe (marker text NOT NULL);
           INSERT INTO backup_restore_probe VALUES ('before-backup');
@@ -134,14 +134,14 @@ jobs:
           sudo rm storage/originals/backup-restore-probe.txt
           sudo tar -xzf "$storage_backup" -C .
           restored_file="$(sudo cat storage/originals/backup-restore-probe.txt 2>&1)" || { echo "Storage file missing after restore: $restored_file"; exit 1; }
-          printf 'Restored storage content: <%s>\\n' "$restored_file"
+          printf 'Restored storage content: <%s>\n' "$restored_file"
           if [ "$restored_file" != "original-file-before-backup" ]; then
             echo "Storage content does not match the pre-backup marker."
             exit 1
           fi
           echo "RESTORE CHECK 4/5: verify database marker"
           restored_marker="$(docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" vacation_restore_test -c "SELECT marker FROM backup_restore_probe"')"
-          printf 'Restored database marker: <%s>\\n' "$restored_marker"
+          printf 'Restored database marker: <%s>\n' "$restored_marker"
           if [ "$restored_marker" != "before-backup" ]; then
             echo "Database marker does not match the pre-backup value."
             exit 1
