@@ -78,16 +78,14 @@ sudo docker run --rm hello-world
 
 ## 3. Подготовить проект
 
-Клонируйте репозиторий и перейдите в каталог приложения:
+Клонируйте основную ветку репозитория и перейдите в каталог приложения:
 
 ```bash
 git clone https://github.com/destorrr/vacation_scheduler_starter.git
-cd vacation_scheduler_starter
-git switch feature/auth-and-permissions
-cd vacation_scheduler
+cd vacation_scheduler_starter/vacation_scheduler
 ```
 
-Перед эксплуатацией зафиксируйте проверенный commit, прошедший CI. Не обновляйте сервер автоматически до произвольного последнего состояния ветки.
+Для рабочего сервера зафиксируйте конкретный commit из `main`, прошедший CI. Не обновляйте сервер автоматически до произвольного последнего состояния ветки.
 
 Создайте файл конфигурации и секреты:
 
